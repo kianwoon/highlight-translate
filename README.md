@@ -2,19 +2,32 @@
 
 Select text on any webpage and instantly translate it to Chinese.
 
-![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-Coming%20Soon-blue)
+![Release](https://img.shields.io/badge/Release-v1.0.0-green) ![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-Coming%20Soon-blue) ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 ## Features
 
 - Highlight any text on a webpage to translate to Chinese
+- Inline translate icon appears near selection
 - Instant popup with translation results
-- Lightweight and fast -- uses the Google Translate API
-- No API key required
+- Supports single words and full sentences
+- Auto-detects source language
+- Lightweight and fast -- no API key required
 - Works on all websites
 
-## How to Install
+## Installation
 
-1. Download or clone this repository
+### Option 1: Download from GitHub Release (Recommended)
+
+1. [Download `highlight-translate-v1.0.0.zip`](https://github.com/kianwoon/highlight-translate/releases/download/v1.0.0/highlight-translate-v1.0.0.zip)
+2. Extract the zip file to a folder on your computer
+3. Open Chrome and go to `chrome://extensions/`
+4. Enable **Developer mode** (toggle in the top-right corner)
+5. Click **Load unpacked** and select the extracted folder
+6. The extension icon will appear in your toolbar
+
+### Option 2: Install from Source
+
+1. Clone this repository
 2. Open Chrome and go to `chrome://extensions/`
 3. Enable **Developer mode** (toggle in the top-right corner)
 4. Click **Load unpacked** and select this project folder
