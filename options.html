@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Highlight Translate Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 32px;
+      max-width: 500px;
+      color: #202124;
+      line-height: 1.6;
+    }
+    h1 { font-size: 20px; margin-bottom: 24px; color: #1a73e8; }
+    .section { margin-bottom: 24px; }
+    label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px; }
+    .input-row { display: flex; gap: 8px; }
+    input[type="password"],
+    input[type="text"] {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 14px;
+      outline: none;
+    }
+    input:focus { border-color: #1a73e8; }
+    textarea {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 14px;
+      font-family: inherit;
+      line-height: 1.5;
+      resize: vertical;
+      outline: none;
+    }
+    textarea:focus { border-color: #1a73e8; }
+    button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .btn-save { background: #1a73e8; color: white; }
+    .btn-save:hover { background: #1557b0; }
+    .btn-toggle {
+      background: #f1f3f4;
+      color: #5f6368;
+      min-width: 40px;
+    }
+    .btn-toggle:hover { background: #e8eaed; }
+    .help { font-size: 13px; color: #5f6368; margin-top: 8px; }
+    .help a { color: #1a73e8; text-decoration: none; }
+    .help a:hover { text-decoration: underline; }
+    .status { margin-top: 8px; font-size: 13px; min-height: 20px; }
+    .status.success { color: #0d652d; }
+    .status.error { color: #c5221f; }
+  </style>
+</head>
+<body>
+  <h1>Highlight Translate Settings</h1>
+
+  <div class="section">
+    <label for="apiKey">Gemini API Key</label>
+    <div class="input-row">
+      <input type="password" id="apiKey" placeholder="Enter your Gemini API key">
+      <button class="btn-toggle" id="toggleBtn" type="button">Show</button>
+    </div>
+    <p class="help">
+      Get your free API key from
+      <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>.
+      Required for Grammar & Humanize feature.
+    </p>
+    <div class="input-row" style="margin-top: 12px;">
+      <button class="btn-save" id="saveBtn" type="button">Save</button>
+      <div class="status" id="status"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <label for="customPrompt">Custom Prompt <span style="font-weight:400;color:#5f6368">(optional)</span></label>
+    <textarea id="customPrompt" rows="3" placeholder="e.g. Make the sentence neat, professional, and with human tone"></textarea>
+    <p class="help">Leave empty to use the default prompt. Only applies to the ✨ (improve) feature.</p>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
