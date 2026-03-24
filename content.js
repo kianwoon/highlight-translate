@@ -58,7 +58,7 @@
     humanizeIconEl.title = "Improve text";
     humanizeIconEl.setAttribute("role", "button");
     humanizeIconEl.setAttribute("aria-label", "Improve selected text");
-    humanizeIconEl.textContent = "\u2728"; // sparkle
+    humanizeIconEl.textContent = "AI";
 
     humanizeIconEl.addEventListener("click", onHumanizeClick);
     document.body.appendChild(humanizeIconEl);
