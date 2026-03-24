@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Highlight Translate",
-  "version": "1.0.0",
-  "description": "Highlight text and translate to Chinese",
+  "version": "1.1.0",
+  "description": "Highlight text to translate or improve with AI",
   "permissions": [
     "activeTab",
-    "scripting"
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
-    "https://translate.googleapis.com/*"
+    "https://translate.googleapis.com/*",
+    "https://generativelanguage.googleapis.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -18,7 +20,8 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "css": ["content.css"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "action": {
@@ -34,5 +37,12 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content-main.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "options_page": "options.html"
 }
