@@ -1,0 +1,125 @@
+/* ==========================================================================
+   Highlight Translate — Content Script Styles
+   All classes prefixed with "ht-" to avoid collisions with host page.
+   ========================================================================== */
+
+/* ---- Translate icon (floating button) ---- */
+
+.ht-translate-icon {
+  position: fixed;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background-color: #ffffff;
+  border: 1px solid #d0d0d0;
+  color: #1a73e8;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 28px;
+  text-align: center;
+  cursor: pointer;
+  z-index: 2147483647;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  user-select: none;
+  display: none;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.ht-translate-icon:hover {
+  border-color: #1a73e8;
+  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.3);
+}
+
+.ht-translate-icon:active {
+  transform: scale(0.92);
+}
+
+/* ---- Translation popup card ---- */
+
+.ht-translate-popup {
+  position: fixed;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  padding: 12px 16px;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.08);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  color: #202124;
+  z-index: 2147483647;
+  display: none;
+  animation: ht-fade-in 0.15s ease-out;
+}
+
+@keyframes ht-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---- Close button ---- */
+
+.ht-close-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: none;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  color: #9aa0a6;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.ht-close-btn:hover {
+  color: #5f6368;
+  background-color: #f1f3f4;
+}
+
+/* ---- Source text ---- */
+
+.ht-source {
+  font-size: 12px;
+  color: #9aa0a6;
+  margin-bottom: 8px;
+  word-break: break-word;
+  padding-right: 20px; /* room for close button */
+  display: none;
+}
+
+/* ---- Loading indicator ---- */
+
+.ht-loading {
+  display: none;
+  width: 24px;
+  height: 24px;
+  border: 3px solid #e8eaed;
+  border-top-color: #1a73e8;
+  border-radius: 50%;
+  animation: ht-spin 0.7s linear infinite;
+  margin: 8px auto;
+}
+
+@keyframes ht-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- Translation result ---- */
+
+.ht-result {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #202124;
+  word-break: break-word;
+}
