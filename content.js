@@ -438,10 +438,10 @@
           showPopup(response.translatedText, text);
         } else if (response && response.error === "NO_API_KEY") {
           var msg =
-            "No API key set. " +
+            "No AI provider configured. " +
             "<a href='" + chrome.runtime.getURL("options.html") +
             "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
-            " to add your Gemini API key.";
+            " to set up your AI provider.";
           var popup = createPopup();
           var sourceEl = popup.querySelector(".ht-source");
           var loadingEl = popup.querySelector(".ht-loading");
@@ -452,6 +452,8 @@
           popup.style.display = "block";
           positionPopup();
           clearDismissTimer();
+        } else if (response && response.error === "API_ERROR") {
+          showPopup(response.translatedText || "API error occurred.", text);
         } else {
           var fallback =
             response && response.translatedText

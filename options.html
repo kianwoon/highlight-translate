@@ -14,19 +14,21 @@
       line-height: 1.6;
     }
     h1 { font-size: 20px; margin-bottom: 24px; color: #1a73e8; }
-    .section { margin-bottom: 24px; }
+    .section { margin-bottom: 20px; }
     label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px; }
-    .input-row { display: flex; gap: 8px; }
+    .input-row { display: flex; gap: 8px; align-items: center; }
     input[type="password"],
-    input[type="text"] {
+    input[type="text"],
+    select {
       flex: 1;
       padding: 8px 12px;
       border: 1px solid #d0d0d0;
       border-radius: 6px;
       font-size: 14px;
       outline: none;
+      background: white;
     }
-    input:focus { border-color: #1a73e8; }
+    input:focus, select:focus { border-color: #1a73e8; }
     textarea {
       width: 100%;
       padding: 8px 12px;
@@ -61,32 +63,57 @@
     .status { margin-top: 8px; font-size: 13px; min-height: 20px; }
     .status.success { color: #0d652d; }
     .status.error { color: #c5221f; }
+    .hidden { display: none !important; }
+    .section + .section { margin-top: 20px; }
   </style>
 </head>
 <body>
   <h1>Highlight Translate Settings</h1>
 
   <div class="section">
-    <label for="apiKey">Gemini API Key</label>
+    <label for="provider">AI Provider</label>
+    <select id="provider">
+      <option value="gemini">Google Gemini</option>
+      <option value="openai">OpenAI</option>
+      <option value="anthropic">Anthropic</option>
+      <option value="custom">Custom (OpenAI-compatible)</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="apiKey">API Key</label>
     <div class="input-row">
-      <input type="password" id="apiKey" placeholder="Enter your Gemini API key">
+      <input type="password" id="apiKey" placeholder="Enter your API key">
       <button class="btn-toggle" id="toggleBtn" type="button">Show</button>
     </div>
-    <p class="help">
-      Get your free API key from
-      <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>.
-      Required for Grammar & Humanize feature.
+    <p class="help" id="helpLink">
+      Get your API key from
+      <a id="helpUrl" href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>.
     </p>
-    <div class="input-row" style="margin-top: 12px;">
-      <button class="btn-save" id="saveBtn" type="button">Save</button>
-      <div class="status" id="status"></div>
-    </div>
+  </div>
+
+  <div class="section">
+    <label for="model">Model <span style="font-weight:400;color:#5f6368">(optional)</span></label>
+    <input type="text" id="model" placeholder="Leave empty to use default">
+  </div>
+
+  <div class="section hidden" id="customEndpointSection">
+    <label for="customEndpoint">Custom Endpoint</label>
+    <input type="text" id="customEndpoint" placeholder="e.g. https://api.groq.com/openai">
+    <p class="help">Base URL without /v1/chat/completions. Works with Groq, Together, Ollama, etc.</p>
   </div>
 
   <div class="section">
     <label for="customPrompt">Custom Prompt <span style="font-weight:400;color:#5f6368">(optional)</span></label>
     <textarea id="customPrompt" rows="3" placeholder="e.g. Make the sentence neat, professional, and with human tone"></textarea>
-    <p class="help">Leave empty to use the default prompt. Only applies to the ✨ (improve) feature.</p>
+    <p class="help">Leave empty to use the default prompt. Only applies to the AI (improve) feature.</p>
+  </div>
+
+  <div class="section">
+    <div class="input-row">
+      <button class="btn-save" id="saveBtn" type="button">Save</button>
+      <div class="status" id="status"></div>
+    </div>
   </div>
 
   <script src="options.js"></script>
