@@ -28,6 +28,7 @@
   let isTranslating = false;
   let injectedSel = null; // selection data relayed from main-world script
   let lastMousePos = null; // Tracks mouse position for icon placement
+  let savedText = ""; // Selected text saved when icon appears (prevents race on click)
 
   // ---------------------------------------------------------------------------
   // DOM helpers
@@ -57,7 +58,7 @@
     humanizeIconEl.title = "Improve text";
     humanizeIconEl.setAttribute("role", "button");
     humanizeIconEl.setAttribute("aria-label", "Improve selected text");
-    humanizeIconEl.textContent = "\u2728"; // sparkle
+    humanizeIconEl.textContent = "AI";
 
     humanizeIconEl.addEventListener("click", onHumanizeClick);
     document.body.appendChild(humanizeIconEl);
@@ -109,7 +110,7 @@
       });
     });
 
-    closeBtn.addEventListener("click", dismiss);
+    closeBtn.addEventListener("click", closePopup);
     document.body.appendChild(popupEl);
     return popupEl;
   }
@@ -236,6 +237,8 @@
       return;
     }
 
+    savedText = text; // Save for click handler — selection may be cleared by the click itself
+
     const icon = createIcon();
     const { top, left } = getSelectionPosition();
     icon.style.top = top + "px";
@@ -318,6 +321,16 @@
   }
 
   function dismiss() {
+    // Never auto-remove the popup — only explicit user action (close button / Escape) can close it.
+    // This prevents X.com Draft.js and other frameworks from dismissing the popup via synthetic events.
+    removeIcon();
+    removeHumanizeIcon();
+    clearDismissTimer();
+    isTranslating = false;
+  }
+
+  function closePopup() {
+    // Explicit close — remove everything including the popup.
     removePopup();
     removeIcon();
     removeHumanizeIcon();
@@ -371,7 +384,7 @@
     e.stopPropagation();
     clearDismissTimer();
 
-    const text = getSelectedText();
+    const text = savedText || getSelectedText(); // Use saved text first (selection may be cleared on click)
     if (!text || isTranslating) return;
 
     isTranslating = true;
@@ -405,7 +418,7 @@
     e.stopPropagation();
     clearDismissTimer();
 
-    const text = getSelectedText();
+    const text = savedText || getSelectedText(); // Use saved text first (selection may be cleared on click)
     if (!text || isTranslating) return;
 
     isTranslating = true;
@@ -425,10 +438,10 @@
           showPopup(response.translatedText, text);
         } else if (response && response.error === "NO_API_KEY") {
           var msg =
-            "No API key set. " +
+            "No AI provider configured. " +
             "<a href='" + chrome.runtime.getURL("options.html") +
             "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
-            " to add your Gemini API key.";
+            " to set up your AI provider.";
           var popup = createPopup();
           var sourceEl = popup.querySelector(".ht-source");
           var loadingEl = popup.querySelector(".ht-loading");
@@ -439,6 +452,8 @@
           popup.style.display = "block";
           positionPopup();
           clearDismissTimer();
+        } else if (response && response.error === "API_ERROR") {
+          showPopup(response.translatedText || "API error occurred.", text);
         } else {
           var fallback =
             response && response.translatedText
@@ -455,6 +470,8 @@
     if (e.target && (e.target.closest(".ht-translate-icon") || e.target.closest(".ht-humanize-icon") || e.target.closest(".ht-translate-popup"))) {
       return;
     }
+    // Don't dismiss popup while translating or while popup is showing a result.
+    if (isTranslating || popupEl) return;
     // Debounce to avoid flicker while the user is still selecting.
     clearTimeout(debounceTimer);
     lastMousePos = { clientX: e.clientX, clientY: e.clientY };
@@ -470,23 +487,30 @@
   }
 
   function onDocumentClick(e) {
-    // Dismiss if clicking outside the icons or popup.
+    // Only remove floating icons when clicking outside.
+    // The popup stays until explicitly closed (X button or Escape).
     var isInsideIcon = iconEl && iconEl.contains(e.target);
     var isInsideHumanizeIcon = humanizeIconEl && humanizeIconEl.contains(e.target);
     var isInsidePopup = popupEl && popupEl.contains(e.target);
 
     if (!isInsideIcon && !isInsideHumanizeIcon && !isInsidePopup) {
-      dismiss();
+      removeIcon();
+      removeHumanizeIcon();
+      clearDismissTimer();
+      isTranslating = false;
     }
   }
 
   function onKeyDown(e) {
     if (e.key === "Escape") {
-      dismiss();
+      closePopup();
     }
   }
 
   function onSelectionChange() {
+    // Don't dismiss while translating or while popup is showing a result.
+    // Clicking the icon clears the selection, but we want the popup to stay.
+    if (isTranslating || popupEl) return;
     // Handle both: showing icon on NEW selection and dismissing on deselection.
     // This is critical for rich-text editors (Quill, contenteditable) where
     // mouseup/pointerup events may be suppressed by the host page.
@@ -496,7 +520,7 @@
       console.log("[HT] selChange in", window.location.hostname, "text:", text ? text.substring(0, 40) : "(empty)");
       if (text && !popupEl) {
         showIcon();
-      } else if (!text && (iconEl || humanizeIconEl || popupEl)) {
+      } else if (!text && (iconEl || humanizeIconEl)) {
         dismiss();
       }
     }, DEBOUNCE_MS);
