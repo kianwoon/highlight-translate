@@ -22,6 +22,8 @@
 
   let iconEl = null;
   let humanizeIconEl = null;
+  let replyIconEl = null;
+  let summaryIconEl = null;
   let popupEl = null;
   let dismissTimer = null;
   let debounceTimer = null;
@@ -63,6 +65,36 @@
     humanizeIconEl.addEventListener("click", onHumanizeClick);
     document.body.appendChild(humanizeIconEl);
     return humanizeIconEl;
+  }
+
+  function createReplyIcon() {
+    if (replyIconEl) return replyIconEl;
+
+    replyIconEl = document.createElement("div");
+    replyIconEl.className = "ht-reply-icon";
+    replyIconEl.title = "Craft a reply";
+    replyIconEl.setAttribute("role", "button");
+    replyIconEl.setAttribute("aria-label", "Craft a reply to selected text");
+    replyIconEl.textContent = "\u2709";
+
+    replyIconEl.addEventListener("click", onReplyClick);
+    document.body.appendChild(replyIconEl);
+    return replyIconEl;
+  }
+
+  function createSummaryIcon() {
+    if (summaryIconEl) return summaryIconEl;
+
+    summaryIconEl = document.createElement("div");
+    summaryIconEl.className = "ht-summary-icon";
+    summaryIconEl.title = "Summarize as TL;DR";
+    summaryIconEl.setAttribute("role", "button");
+    summaryIconEl.setAttribute("aria-label", "Summarize selected text as TL;DR");
+    summaryIconEl.textContent = "\u2211"; // ∑
+
+    summaryIconEl.addEventListener("click", onSummaryClick);
+    document.body.appendChild(summaryIconEl);
+    return summaryIconEl;
   }
 
   function createPopup() {
@@ -126,6 +158,20 @@
     if (humanizeIconEl) {
       humanizeIconEl.remove();
       humanizeIconEl = null;
+    }
+  }
+
+  function removeReplyIcon() {
+    if (replyIconEl) {
+      replyIconEl.remove();
+      replyIconEl = null;
+    }
+  }
+
+  function removeSummaryIcon() {
+    if (summaryIconEl) {
+      summaryIconEl.remove();
+      summaryIconEl = null;
     }
   }
 
@@ -250,6 +296,16 @@
     humanizeIcon.style.left = left + "px";
     humanizeIcon.style.display = "block";
 
+    const replyIcon = createReplyIcon();
+    replyIcon.style.top = (top + 72) + "px";
+    replyIcon.style.left = left + "px";
+    replyIcon.style.display = "block";
+
+    const summaryIcon = createSummaryIcon();
+    summaryIcon.style.top = (top + 108) + "px";
+    summaryIcon.style.left = left + "px";
+    summaryIcon.style.display = "block";
+
     resetDismissTimer();
   }
 
@@ -257,29 +313,43 @@
     if (!popupEl) return;
 
     // Position relative to whichever icon triggered it.
-    let anchorEl = iconEl || humanizeIconEl;
+    let anchorEl = replyIconEl || humanizeIconEl || iconEl;
     if (!anchorEl) return;
 
     const anchorRect = anchorEl.getBoundingClientRect();
-    let top = anchorRect.bottom + 6;
-    let left = anchorRect.left;
-
-    // Keep popup within viewport.
-    const vw = window.innerWidth;
     const vh = window.innerHeight;
+    const vw = window.innerWidth;
     const popupWidth = 320;
 
+    let left = anchorRect.left;
+
+    // Keep popup within viewport horizontally.
     if (left + popupWidth > vw) {
       left = Math.max(8, vw - popupWidth - 8);
     }
-    if (top + 200 > vh) {
-      // Not enough room below; flip above the icon.
+
+    // Calculate available space above and below the anchor icon.
+    const spaceAbove = anchorRect.top - 8;
+    const spaceBelow = vh - anchorRect.bottom - 8;
+    const minPopupHeight = 80;
+
+    // Determine which direction has more room.
+    const showAbove = spaceAbove >= spaceBelow;
+
+    let top, maxH;
+
+    if (showAbove) {
       top = anchorRect.top - 6;
       popupEl.style.transform = "translateY(-100%)";
+      maxH = Math.max(minPopupHeight, spaceAbove);
     } else {
+      top = anchorRect.bottom + 6;
       popupEl.style.transform = "translateY(0)";
+      maxH = Math.max(minPopupHeight, spaceBelow);
     }
 
+    // Clamp popup height to available space.
+    popupEl.style.maxHeight = maxH + "px";
     popupEl.style.top = top + "px";
     popupEl.style.left = left + "px";
   }
@@ -325,6 +395,7 @@
     // This prevents X.com Draft.js and other frameworks from dismissing the popup via synthetic events.
     removeIcon();
     removeHumanizeIcon();
+    removeReplyIcon();
     clearDismissTimer();
     isTranslating = false;
   }
@@ -334,6 +405,8 @@
     removePopup();
     removeIcon();
     removeHumanizeIcon();
+    removeReplyIcon();
+    removeSummaryIcon();
     clearDismissTimer();
     isTranslating = false;
   }
@@ -465,9 +538,113 @@
     );
   }
 
+  function onReplyClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    clearDismissTimer();
+
+    const text = savedText || getSelectedText();
+    if (!text || isTranslating) return;
+
+    isTranslating = true;
+    showLoading();
+
+    chrome.runtime.sendMessage(
+      { action: "reply", text: text },
+      function (response) {
+        isTranslating = false;
+
+        if (chrome.runtime.lastError) {
+          showPopup("Failed to craft reply. Please try again.", text);
+          return;
+        }
+
+        if (response && response.success) {
+          showPopup(response.translatedText, text);
+        } else if (response && response.error === "NO_API_KEY") {
+          var msg =
+            "No AI provider configured. " +
+            "<a href='" + chrome.runtime.getURL("options.html") +
+            "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
+            " to set up your AI provider.";
+          var popup = createPopup();
+          var sourceEl = popup.querySelector(".ht-source");
+          var loadingEl = popup.querySelector(".ht-loading");
+          var resultEl = popup.querySelector(".ht-result");
+          loadingEl.style.display = "none";
+          sourceEl.style.display = "none";
+          resultEl.innerHTML = msg;
+          popup.style.display = "block";
+          positionPopup();
+          clearDismissTimer();
+        } else if (response && response.error === "API_ERROR") {
+          showPopup(response.translatedText || "API error occurred.", text);
+        } else {
+          var fallback =
+            response && response.translatedText
+              ? response.translatedText
+              : "Failed to craft reply. Please try again.";
+          showPopup(fallback, text);
+        }
+      }
+    );
+  }
+
+  function onSummaryClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    clearDismissTimer();
+
+    const text = savedText || getSelectedText();
+    if (!text || isTranslating) return;
+
+    isTranslating = true;
+    showLoading();
+
+    chrome.runtime.sendMessage(
+      { action: "summarize", text: text },
+      function (response) {
+        isTranslating = false;
+
+        if (chrome.runtime.lastError) {
+          showPopup("Failed to summarize. Please try again.", text);
+          return;
+        }
+
+        if (response && response.success) {
+          showPopup(response.translatedText, text);
+        } else if (response && response.error === "NO_API_KEY") {
+          var msg =
+            "No AI provider configured. " +
+            "<a href='" + chrome.runtime.getURL("options.html") +
+            "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
+            " to set up your AI provider.";
+          var popup = createPopup();
+          var sourceEl = popup.querySelector(".ht-source");
+          var loadingEl = popup.querySelector(".ht-loading");
+          var resultEl = popup.querySelector(".ht-result");
+          loadingEl.style.display = "none";
+          sourceEl.style.display = "none";
+          resultEl.innerHTML = msg;
+          popup.style.display = "block";
+          positionPopup();
+          clearDismissTimer();
+        } else if (response && response.error === "API_ERROR") {
+          showPopup(response.translatedText || "API error occurred.", text);
+        } else {
+          var fallback =
+            response && response.translatedText
+              ? response.translatedText
+              : "Failed to summarize. Please try again.";
+          showPopup(fallback, text);
+        }
+      }
+    );
+  }
+
   function onMouseUp(e) {
     // Don't reposition icon when clicking the icon itself or the humanize icon.
-    if (e.target && (e.target.closest(".ht-translate-icon") || e.target.closest(".ht-humanize-icon") || e.target.closest(".ht-translate-popup"))) {
+    if (e.target && (e.target.closest(".ht-translate-icon") || e.target.closest(".ht-humanize-icon") || e.target.closest(".ht-reply-icon") || e.target.closest(".ht-summary-icon") || e.target.closest(".ht-translate-popup"))) {
       return;
     }
     // Don't dismiss popup while translating or while popup is showing a result.
@@ -491,11 +668,15 @@
     // The popup stays until explicitly closed (X button or Escape).
     var isInsideIcon = iconEl && iconEl.contains(e.target);
     var isInsideHumanizeIcon = humanizeIconEl && humanizeIconEl.contains(e.target);
+    var isInsideReplyIcon = replyIconEl && replyIconEl.contains(e.target);
+    var isInsideSummaryIcon = summaryIconEl && summaryIconEl.contains(e.target);
     var isInsidePopup = popupEl && popupEl.contains(e.target);
 
-    if (!isInsideIcon && !isInsideHumanizeIcon && !isInsidePopup) {
+    if (!isInsideIcon && !isInsideHumanizeIcon && !isInsideReplyIcon && !isInsideSummaryIcon && !isInsidePopup) {
       removeIcon();
       removeHumanizeIcon();
+      removeReplyIcon();
+      removeSummaryIcon();
       clearDismissTimer();
       isTranslating = false;
     }
@@ -520,7 +701,7 @@
       console.log("[HT] selChange in", window.location.hostname, "text:", text ? text.substring(0, 40) : "(empty)");
       if (text && !popupEl) {
         showIcon();
-      } else if (!text && (iconEl || humanizeIconEl)) {
+      } else if (!text && (iconEl || humanizeIconEl || replyIconEl || summaryIconEl)) {
         dismiss();
       }
     }, DEBOUNCE_MS);
