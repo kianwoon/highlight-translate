@@ -110,6 +110,18 @@
   </div>
 
   <div class="section">
+    <label for="replyPrompt">Reply Prompt <span style="font-weight:400;color:#5f6368">(optional)</span></label>
+    <textarea id="replyPrompt" rows="3" placeholder="e.g. Write a professional, concise reply to the following message. Match the tone and context. Return ONLY the reply text."></textarea>
+    <p class="help">Customize the AI prompt for crafting replies. Leave empty to use the default.</p>
+  </div>
+
+  <div class="section">
+    <label for="summaryPrompt">Summary Prompt <span style="font-weight:400;color:#5f6368">(optional)</span></label>
+    <textarea id="summaryPrompt" rows="3" placeholder="e.g. Summarize the following text as a TL;DR with concise bullet points. Return ONLY the bullet points, each starting with '•'."></textarea>
+    <p class="help">Customize the AI prompt for summarizing text. Leave empty to use the default.</p>
+  </div>
+
+  <div class="section">
     <div class="input-row">
       <button class="btn-save" id="saveBtn" type="button">Save</button>
       <div class="status" id="status"></div>

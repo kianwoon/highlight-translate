@@ -6,6 +6,8 @@ document.addEventListener('DOMContentLoaded', function () {
   const customEndpointSection = document.getElementById('customEndpointSection');
   const customEndpointInput = document.getElementById('customEndpoint');
   const customPromptInput = document.getElementById('customPrompt');
+  const replyPromptInput = document.getElementById('replyPrompt');
+  const summaryPromptInput = document.getElementById('summaryPrompt');
   const saveBtn = document.getElementById('saveBtn');
   const statusDiv = document.getElementById('status');
   const helpLink = document.getElementById('helpLink');
@@ -53,7 +55,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // Load saved settings
-  chrome.storage.local.get(['provider', 'apiKey', 'model', 'customEndpoint', 'customPrompt'], function (data) {
+  chrome.storage.local.get(['provider', 'apiKey', 'model', 'customEndpoint', 'customPrompt', 'replyPrompt', 'summaryPrompt'], function (data) {
     if (data.provider) {
       providerSelect.value = data.provider;
     }
@@ -68,6 +70,12 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     if (data.customPrompt) {
       customPromptInput.value = data.customPrompt;
+    }
+    if (data.replyPrompt) {
+      replyPromptInput.value = data.replyPrompt;
+    }
+    if (data.summaryPrompt) {
+      summaryPromptInput.value = data.summaryPrompt;
     }
     updateUIForProvider(providerSelect.value);
   });
@@ -104,6 +112,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const model = modelInput.value.trim();
     let endpoint = customEndpointInput.value.trim();
     const prompt = customPromptInput.value.trim();
+    const replyPrompt = replyPromptInput.value.trim();
+    const summaryPrompt = summaryPromptInput.value.trim();
 
     // Validation
     if (!key) {
@@ -135,19 +145,19 @@ document.addEventListener('DOMContentLoaded', function () {
         origins: [endpoint + '/*']
       }, function (granted) {
         if (granted) {
-          saveSettings(provider, key, model, endpoint, prompt);
+          saveSettings(provider, key, model, endpoint, prompt, replyPrompt, summaryPrompt);
         } else {
           statusDiv.textContent = 'Permission denied. The extension needs access to the custom endpoint.';
           statusDiv.className = 'status error';
         }
       });
     } else {
-      saveSettings(provider, key, model, endpoint, prompt);
+      saveSettings(provider, key, model, endpoint, prompt, replyPrompt, summaryPrompt);
     }
   });
 
-  function saveSettings(provider, key, model, endpoint, prompt) {
-    const data = { provider: provider, apiKey: key, customPrompt: prompt };
+  function saveSettings(provider, key, model, endpoint, prompt, replyPrompt, summaryPrompt) {
+    const data = { provider: provider, apiKey: key, customPrompt: prompt, replyPrompt: replyPrompt, summaryPrompt: summaryPrompt };
     if (model) data.model = model;
     if (provider === 'custom' && endpoint) data.customEndpoint = endpoint;
 
