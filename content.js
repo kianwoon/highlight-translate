@@ -463,27 +463,32 @@
     isTranslating = true;
     showLoading();
 
-    chrome.runtime.sendMessage(
-      { action: "translate", text: text },
-      function (response) {
-        isTranslating = false;
+    try {
+      chrome.runtime.sendMessage(
+        { action: "translate", text: text },
+        function (response) {
+          isTranslating = false;
 
-        if (chrome.runtime.lastError) {
-          showPopup("Translation failed. Please try again.", text);
-          return;
-        }
+          if (chrome.runtime.lastError) {
+            showPopup("Translation failed. Please try again.", text);
+            return;
+          }
 
-        if (response && response.success) {
-          showPopup(response.translatedText, text);
-        } else {
-          var fallback =
-            response && response.translatedText
-              ? response.translatedText
-              : "Translation failed. Please try again.";
-          showPopup(fallback, text);
+          if (response && response.success) {
+            showPopup(response.translatedText, text);
+          } else {
+            var fallback =
+              response && response.translatedText
+                ? response.translatedText
+                : "Translation failed. Please try again.";
+            showPopup(fallback, text);
+          }
         }
-      }
-    );
+      );
+    } catch (e) {
+      isTranslating = false;
+      showPopup("Extension reloaded. Please refresh the page.", text);
+    }
   }
 
   function onHumanizeClick(e) {
@@ -497,45 +502,50 @@
     isTranslating = true;
     showLoading();
 
-    chrome.runtime.sendMessage(
-      { action: "improve", text: text },
-      function (response) {
-        isTranslating = false;
+    try {
+      chrome.runtime.sendMessage(
+        { action: "improve", text: text },
+        function (response) {
+          isTranslating = false;
 
-        if (chrome.runtime.lastError) {
-          showPopup("Failed to improve text. Please try again.", text);
-          return;
-        }
+          if (chrome.runtime.lastError) {
+            showPopup("Failed to improve text. Please try again.", text);
+            return;
+          }
 
-        if (response && response.success) {
-          showPopup(response.translatedText, text);
-        } else if (response && response.error === "NO_API_KEY") {
-          var msg =
-            "No AI provider configured. " +
-            "<a href='" + chrome.runtime.getURL("options.html") +
-            "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
-            " to set up your AI provider.";
-          var popup = createPopup();
-          var sourceEl = popup.querySelector(".ht-source");
-          var loadingEl = popup.querySelector(".ht-loading");
-          var resultEl = popup.querySelector(".ht-result");
-          loadingEl.style.display = "none";
-          sourceEl.style.display = "none";
-          resultEl.innerHTML = msg;
-          popup.style.display = "block";
-          positionPopup();
-          clearDismissTimer();
-        } else if (response && response.error === "API_ERROR") {
-          showPopup(response.translatedText || "API error occurred.", text);
-        } else {
-          var fallback =
-            response && response.translatedText
-              ? response.translatedText
-              : "Failed to improve text. Please try again.";
-          showPopup(fallback, text);
+          if (response && response.success) {
+            showPopup(response.translatedText, text);
+          } else if (response && response.error === "NO_API_KEY") {
+            var msg =
+              "No AI provider configured. " +
+              "<a href='" + chrome.runtime.getURL("options.html") +
+              "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
+              " to set up your AI provider.";
+            var popup = createPopup();
+            var sourceEl = popup.querySelector(".ht-source");
+            var loadingEl = popup.querySelector(".ht-loading");
+            var resultEl = popup.querySelector(".ht-result");
+            loadingEl.style.display = "none";
+            sourceEl.style.display = "none";
+            resultEl.innerHTML = msg;
+            popup.style.display = "block";
+            positionPopup();
+            clearDismissTimer();
+          } else if (response && response.error === "API_ERROR") {
+            showPopup(response.translatedText || "API error occurred.", text);
+          } else {
+            var fallback =
+              response && response.translatedText
+                ? response.translatedText
+                : "Failed to improve text. Please try again.";
+            showPopup(fallback, text);
+          }
         }
-      }
-    );
+      );
+    } catch (e) {
+      isTranslating = false;
+      showPopup("Extension reloaded. Please refresh the page.", text);
+    }
   }
 
   function onReplyClick(e) {
@@ -549,45 +559,50 @@
     isTranslating = true;
     showLoading();
 
-    chrome.runtime.sendMessage(
-      { action: "reply", text: text },
-      function (response) {
-        isTranslating = false;
+    try {
+      chrome.runtime.sendMessage(
+        { action: "reply", text: text },
+        function (response) {
+          isTranslating = false;
 
-        if (chrome.runtime.lastError) {
-          showPopup("Failed to craft reply. Please try again.", text);
-          return;
-        }
+          if (chrome.runtime.lastError) {
+            showPopup("Failed to craft reply. Please try again.", text);
+            return;
+          }
 
-        if (response && response.success) {
-          showPopup(response.translatedText, text);
-        } else if (response && response.error === "NO_API_KEY") {
-          var msg =
-            "No AI provider configured. " +
-            "<a href='" + chrome.runtime.getURL("options.html") +
-            "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
-            " to set up your AI provider.";
-          var popup = createPopup();
-          var sourceEl = popup.querySelector(".ht-source");
-          var loadingEl = popup.querySelector(".ht-loading");
-          var resultEl = popup.querySelector(".ht-result");
-          loadingEl.style.display = "none";
-          sourceEl.style.display = "none";
-          resultEl.innerHTML = msg;
-          popup.style.display = "block";
-          positionPopup();
-          clearDismissTimer();
-        } else if (response && response.error === "API_ERROR") {
-          showPopup(response.translatedText || "API error occurred.", text);
-        } else {
-          var fallback =
-            response && response.translatedText
-              ? response.translatedText
-              : "Failed to craft reply. Please try again.";
-          showPopup(fallback, text);
+          if (response && response.success) {
+            showPopup(response.translatedText, text);
+          } else if (response && response.error === "NO_API_KEY") {
+            var msg =
+              "No AI provider configured. " +
+              "<a href='" + chrome.runtime.getURL("options.html") +
+              "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
+              " to set up your AI provider.";
+            var popup = createPopup();
+            var sourceEl = popup.querySelector(".ht-source");
+            var loadingEl = popup.querySelector(".ht-loading");
+            var resultEl = popup.querySelector(".ht-result");
+            loadingEl.style.display = "none";
+            sourceEl.style.display = "none";
+            resultEl.innerHTML = msg;
+            popup.style.display = "block";
+            positionPopup();
+            clearDismissTimer();
+          } else if (response && response.error === "API_ERROR") {
+            showPopup(response.translatedText || "API error occurred.", text);
+          } else {
+            var fallback =
+              response && response.translatedText
+                ? response.translatedText
+                : "Failed to craft reply. Please try again.";
+            showPopup(fallback, text);
+          }
         }
-      }
-    );
+      );
+    } catch (e) {
+      isTranslating = false;
+      showPopup("Extension reloaded. Please refresh the page.", text);
+    }
   }
 
   function onSummaryClick(e) {
@@ -601,45 +616,50 @@
     isTranslating = true;
     showLoading();
 
-    chrome.runtime.sendMessage(
-      { action: "summarize", text: text },
-      function (response) {
-        isTranslating = false;
+    try {
+      chrome.runtime.sendMessage(
+        { action: "summarize", text: text },
+        function (response) {
+          isTranslating = false;
 
-        if (chrome.runtime.lastError) {
-          showPopup("Failed to summarize. Please try again.", text);
-          return;
-        }
+          if (chrome.runtime.lastError) {
+            showPopup("Failed to summarize. Please try again.", text);
+            return;
+          }
 
-        if (response && response.success) {
-          showPopup(response.translatedText, text);
-        } else if (response && response.error === "NO_API_KEY") {
-          var msg =
-            "No AI provider configured. " +
-            "<a href='" + chrome.runtime.getURL("options.html") +
-            "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
-            " to set up your AI provider.";
-          var popup = createPopup();
-          var sourceEl = popup.querySelector(".ht-source");
-          var loadingEl = popup.querySelector(".ht-loading");
-          var resultEl = popup.querySelector(".ht-result");
-          loadingEl.style.display = "none";
-          sourceEl.style.display = "none";
-          resultEl.innerHTML = msg;
-          popup.style.display = "block";
-          positionPopup();
-          clearDismissTimer();
-        } else if (response && response.error === "API_ERROR") {
-          showPopup(response.translatedText || "API error occurred.", text);
-        } else {
-          var fallback =
-            response && response.translatedText
-              ? response.translatedText
-              : "Failed to summarize. Please try again.";
-          showPopup(fallback, text);
+          if (response && response.success) {
+            showPopup(response.translatedText, text);
+          } else if (response && response.error === "NO_API_KEY") {
+            var msg =
+              "No AI provider configured. " +
+              "<a href='" + chrome.runtime.getURL("options.html") +
+              "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
+              " to set up your AI provider.";
+            var popup = createPopup();
+            var sourceEl = popup.querySelector(".ht-source");
+            var loadingEl = popup.querySelector(".ht-loading");
+            var resultEl = popup.querySelector(".ht-result");
+            loadingEl.style.display = "none";
+            sourceEl.style.display = "none";
+            resultEl.innerHTML = msg;
+            popup.style.display = "block";
+            positionPopup();
+            clearDismissTimer();
+          } else if (response && response.error === "API_ERROR") {
+            showPopup(response.translatedText || "API error occurred.", text);
+          } else {
+            var fallback =
+              response && response.translatedText
+                ? response.translatedText
+                : "Failed to summarize. Please try again.";
+            showPopup(fallback, text);
+          }
         }
-      }
-    );
+      );
+    } catch (e) {
+      isTranslating = false;
+      showPopup("Extension reloaded. Please refresh the page.", text);
+    }
   }
 
   function onMouseUp(e) {
