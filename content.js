@@ -20,6 +20,8 @@
   // State
   // ---------------------------------------------------------------------------
 
+  let shadowHost = null;
+  let shadowRoot = null;
   let iconEl = null;
   let humanizeIconEl = null;
   let replyIconEl = null;
@@ -31,6 +33,37 @@
   let injectedSel = null; // selection data relayed from main-world script
   let lastMousePos = null; // Tracks mouse position for icon placement
   let savedText = ""; // Selected text saved when icon appears (prevents race on click)
+
+  // ---------------------------------------------------------------------------
+  // Shadow DOM initialization for CSS isolation
+  // ---------------------------------------------------------------------------
+
+  function initShadowDOM() {
+    shadowHost = document.createElement("div");
+    shadowHost.id = "ht-shadow-host";
+    // Reset all inherited CSS properties to prevent host page styles from leaking in
+    // (e.g., color: white from user-injected CSS), then override with our specific values
+    shadowHost.style.cssText = "all:initial; position:fixed; top:0; left:0; width:0; height:0; pointer-events:auto; z-index:2147483647;";
+    shadowRoot = shadowHost.attachShadow({ mode: "open" });
+
+    // Load content.css synchronously into shadow root
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", chrome.runtime.getURL("content.css"), false);
+    xhr.send();
+    var styleEl = document.createElement("style");
+    styleEl.textContent = xhr.responseText;
+    shadowRoot.appendChild(styleEl);
+
+    document.body.appendChild(shadowHost);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helper for event handling inside Shadow DOM
+  // ---------------------------------------------------------------------------
+
+  function isInsideExtension(e) {
+    return shadowHost != null && e.composedPath().indexOf(shadowHost) !== -1;
+  }
 
   // ---------------------------------------------------------------------------
   // Safe message wrapper
@@ -70,8 +103,8 @@
     iconEl.textContent = "\u8BD1"; // "译"
 
     iconEl.addEventListener("click", onIconClick);
-    console.log("[HT] Appending icon to body in", window.location.hostname);
-    document.body.appendChild(iconEl);
+    console.log("[HT] Appending icon to shadow root in", window.location.hostname);
+    shadowRoot.appendChild(iconEl);
     return iconEl;
   }
 
@@ -86,7 +119,7 @@
     humanizeIconEl.textContent = "AI";
 
     humanizeIconEl.addEventListener("click", onHumanizeClick);
-    document.body.appendChild(humanizeIconEl);
+    shadowRoot.appendChild(humanizeIconEl);
     return humanizeIconEl;
   }
 
@@ -101,7 +134,7 @@
     replyIconEl.textContent = "\u2709";
 
     replyIconEl.addEventListener("click", onReplyClick);
-    document.body.appendChild(replyIconEl);
+    shadowRoot.appendChild(replyIconEl);
     return replyIconEl;
   }
 
@@ -116,7 +149,7 @@
     summaryIconEl.textContent = "\u2211"; // ∑
 
     summaryIconEl.addEventListener("click", onSummaryClick);
-    document.body.appendChild(summaryIconEl);
+    shadowRoot.appendChild(summaryIconEl);
     return summaryIconEl;
   }
 
@@ -166,7 +199,7 @@
     });
 
     closeBtn.addEventListener("click", closePopup);
-    document.body.appendChild(popupEl);
+    shadowRoot.appendChild(popupEl);
     return popupEl;
   }
 
@@ -332,6 +365,24 @@
     resetDismissTimer();
   }
 
+  /** Expand popup width to fit content (up to viewport limit). */
+  function resizePopupToFit() {
+    if (!popupEl) return;
+    const vw = window.innerWidth;
+    const maxWidth = vw - 16; // leave 8px margin each side
+
+    // Temporarily remove width constraints to measure natural content width.
+    popupEl.style.width = "auto";
+    popupEl.style.minWidth = "0";
+
+    // Measure the content's ideal width (scrollWidth includes overflow).
+    const contentWidth = popupEl.scrollWidth;
+    const targetWidth = Math.min(Math.max(contentWidth, 200), maxWidth);
+
+    popupEl.style.width = targetWidth + "px";
+    popupEl.style.minWidth = "200px";
+  }
+
   function positionPopup() {
     if (!popupEl) return;
 
@@ -342,7 +393,10 @@
     const anchorRect = anchorEl.getBoundingClientRect();
     const vh = window.innerHeight;
     const vw = window.innerWidth;
-    const popupWidth = 320;
+
+    // Use actual rendered width after auto-resize.
+    resizePopupToFit();
+    const popupWidth = popupEl.offsetWidth;
 
     let left = anchorRect.left;
 
@@ -393,6 +447,8 @@
     resultEl.textContent = translatedText;
     popup.style.display = "block";
 
+    // Auto-resize to fit content, then reposition.
+    resizePopupToFit();
     positionPopup();
     // Don't auto-dismiss the popup — let user close it manually.
     clearDismissTimer();
@@ -410,6 +466,7 @@
     sourceEl.style.display = "none";
     popup.style.display = "block";
 
+    resizePopupToFit();
     positionPopup();
   }
 
@@ -419,6 +476,7 @@
     removeIcon();
     removeHumanizeIcon();
     removeReplyIcon();
+    removeSummaryIcon();
     clearDismissTimer();
     isTranslating = false;
   }
@@ -654,8 +712,8 @@
   }
 
   function onMouseUp(e) {
-    // Don't reposition icon when clicking the icon itself or the humanize icon.
-    if (e.target && (e.target.closest(".ht-translate-icon") || e.target.closest(".ht-humanize-icon") || e.target.closest(".ht-reply-icon") || e.target.closest(".ht-summary-icon") || e.target.closest(".ht-translate-popup"))) {
+    // Don't reposition icon when clicking inside the extension's shadow DOM.
+    if (isInsideExtension(e)) {
       return;
     }
     // Don't dismiss popup while translating or while popup is showing a result.
@@ -675,15 +733,9 @@
   }
 
   function onDocumentClick(e) {
-    // Only remove floating icons when clicking outside.
+    // Only remove floating icons when clicking outside the extension's shadow DOM.
     // The popup stays until explicitly closed (X button or Escape).
-    var isInsideIcon = iconEl && iconEl.contains(e.target);
-    var isInsideHumanizeIcon = humanizeIconEl && humanizeIconEl.contains(e.target);
-    var isInsideReplyIcon = replyIconEl && replyIconEl.contains(e.target);
-    var isInsideSummaryIcon = summaryIconEl && summaryIconEl.contains(e.target);
-    var isInsidePopup = popupEl && popupEl.contains(e.target);
-
-    if (!isInsideIcon && !isInsideHumanizeIcon && !isInsideReplyIcon && !isInsideSummaryIcon && !isInsidePopup) {
+    if (!isInsideExtension(e)) {
       removeIcon();
       removeHumanizeIcon();
       removeReplyIcon();
@@ -721,6 +773,8 @@
   // ---------------------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------------------
+
+  initShadowDOM();
 
   document.addEventListener("mouseup", onMouseUp, true);
   document.addEventListener("pointerup", onMouseUp, true);  // touch / stylus support

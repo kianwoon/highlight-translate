@@ -22,6 +22,7 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
   user-select: none;
   display: none;
+  pointer-events: auto;
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
@@ -53,6 +54,7 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
   user-select: none;
   display: none;
+  pointer-events: auto;
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
@@ -84,6 +86,7 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
   user-select: none;
   display: none;
+  pointer-events: auto;
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
@@ -115,6 +118,7 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
   user-select: none;
   display: none;
+  pointer-events: auto;
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
@@ -131,10 +135,11 @@
 
 .ht-translate-popup {
   position: fixed;
-  width: 320px;
+  width: auto;
+  min-width: 200px;
   max-width: calc(100vw - 16px);
   max-height: 70vh;
-  overflow-y: auto;
+  overflow: auto;
   padding: 30px 16px 12px 16px;
   background: #ffffff;
   border-radius: 8px;
@@ -145,6 +150,7 @@
   color: #202124;
   z-index: 2147483647;
   display: none;
+  pointer-events: auto;
   animation: ht-fade-in 0.15s ease-out;
 }
 
