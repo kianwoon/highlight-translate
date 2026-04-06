@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — Highlight Translate</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #333; line-height: 1.7; }
+    h1 { font-size: 1.8em; margin-bottom: 0.3em; }
+    h2 { font-size: 1.3em; margin-top: 2em; color: #1a1a1a; }
+    .updated { color: #666; font-size: 0.9em; }
+    table { width: 100%; border-collapse: collapse; margin: 1em 0; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #ddd; }
+    th { background: #f5f5f5; font-weight: 600; }
+    ul { padding-left: 1.5em; }
+    li { margin-bottom: 0.4em; }
+  </style>
+</head>
+<body>
+
+<h1>Privacy Policy for Highlight Translate</h1>
+<p class="updated">Last updated: April 7, 2026</p>
+
+<p>Highlight Translate ("the Extension") is committed to protecting your privacy. This policy describes what data the Extension collects, how it is used, stored, and shared.</p>
+
+<h2>1. Data We Collect</h2>
+<p>The Extension collects only the minimum data necessary to provide its core functionality:</p>
+
+<table>
+  <thead>
+    <tr><th>Data Type</th><th>Description</th><th>Purpose</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>User Preferences</strong></td>
+      <td>Selected AI provider, model name, custom prompt templates, and custom API endpoint URL</td>
+      <td>Remember your settings between sessions</td>
+    </tr>
+    <tr>
+      <td><strong>API Keys</strong></td>
+      <td>API key for your chosen AI provider (e.g., OpenAI, Anthropic, Google Gemini)</td>
+      <td>Authenticate requests to the AI service on your behalf</td>
+    </tr>
+    <tr>
+      <td><strong>Selected Text</strong></td>
+      <td>Text you highlight on a webpage when triggering a translation, improvement, reply, or summary action</td>
+      <td>Process your request via the selected AI provider</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>We do not collect:</strong> browsing history, personal identification information, cookies, analytics data, or any data unrelated to the Extension's functionality.</p>
+
+<h2>2. How We Use Your Data</h2>
+<ul>
+  <li><strong>User Preferences &amp; API Keys</strong> — Stored locally in your browser using the Chrome Storage API (<code>chrome.storage.local</code>). These are used solely to persist your configuration across browser sessions.</li>
+  <li><strong>Selected Text</strong> — Sent directly from your browser to your chosen AI provider's API for processing. The text is used only to generate the requested output (translation, improvement, reply, or summary).</li>
+</ul>
+
+<h2>3. Data Storage</h2>
+<ul>
+  <li>All user preferences and API keys are stored <strong>locally on your device</strong> using Chrome's built-in local storage (<code>chrome.storage.local</code>).</li>
+  <li>We do <strong>not</strong> operate any servers, databases, or cloud services that store your data.</li>
+  <li>Data persists only on your device until you clear Extension data or uninstall the Extension.</li>
+</ul>
+
+<h2>4. Data Sharing &amp; Third Parties</h2>
+<p>The Extension shares data <strong>only</strong> with the AI provider you configure. No data is sent to any other party.</p>
+
+<table>
+  <thead>
+    <tr><th>Third Party</th><th>Data Shared</th><th>Purpose</th><th>Provider Privacy Policy</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Google (Gemini API)</strong></td>
+      <td>Highlighted text and your custom prompt</td>
+      <td>AI-powered translation, improvement, reply, and summary generation</td>
+      <td><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">https://policies.google.com/privacy</a></td>
+    </tr>
+    <tr>
+      <td><strong>OpenAI (API)</strong></td>
+      <td>Highlighted text and your custom prompt</td>
+      <td>AI-powered translation, improvement, reply, and summary generation</td>
+      <td><a href="https://openai.com/privacy" target="_blank" rel="noopener">https://openai.com/privacy</a></td>
+    </tr>
+    <tr>
+      <td><strong>Anthropic (API)</strong></td>
+      <td>Highlighted text and your custom prompt</td>
+      <td>AI-powered translation, improvement, reply, and summary generation</td>
+      <td><a href="https://www.anthropic.com/privacy" target="_blank" rel="noopener">https://www.anthropic.com/privacy</a></td>
+    </tr>
+    <tr>
+      <td><strong>Custom Endpoint</strong></td>
+      <td>Highlighted text and your custom prompt</td>
+      <td>AI-powered translation, improvement, reply, and summary generation via user-configured endpoint</td>
+      <td>Determined by the user's chosen endpoint provider</td>
+    </tr>
+    <tr>
+      <td><strong>Google Translate</strong></td>
+      <td>Highlighted text</td>
+      <td>Free translation (fallback / default provider)</td>
+      <td><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">https://policies.google.com/privacy</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>Important:</strong> When you configure a custom API endpoint, the highlighted text will be sent to that endpoint. You are responsible for reviewing the privacy practices of your chosen endpoint provider.</p>
+
+<h2>5. Data Retention</h2>
+<ul>
+  <li><strong>Local data</strong> (preferences, API keys) is retained until you clear Extension data or uninstall the Extension.</li>
+  <li><strong>AI provider data retention</strong> is governed by each provider's respective privacy policy (linked above). The Extension itself has no control over how long these providers retain API request data.</li>
+</ul>
+
+<h2>6. User Rights &amp; Control</h2>
+<ul>
+  <li>You may view, modify, or delete your stored preferences and API keys at any time via the Extension's Options page.</li>
+  <li>Uninstalling the Extension removes all locally stored data.</li>
+  <li>You may choose which AI provider to use, thereby controlling which third party receives your text data.</li>
+</ul>
+
+<h2>7. Children's Privacy</h2>
+<p>The Extension is not directed at children under 13. We do not knowingly collect data from children under 13.</p>
+
+<h2>8. Security</h2>
+<ul>
+  <li>API keys are stored locally using Chrome's secure storage mechanism and are never transmitted except to authenticate with your chosen AI provider over HTTPS.</li>
+  <li>All API communications use encrypted HTTPS connections.</li>
+  <li>No data is transmitted to any server operated by the Extension developer.</li>
+</ul>
+
+<h2>9. Changes to This Policy</h2>
+<p>We may update this privacy policy from time to time. Changes will be reflected in the "Last updated" date above. Continued use of the Extension after changes constitutes acceptance of the updated policy.</p>
+
+<h2>10. Contact</h2>
+<p>If you have questions about this privacy policy or the Extension's data practices, please contact us at:</p>
+<p><strong>Email:</strong> <a href="mailto:kianwoonwong@gmail.com">kianwoonwong@gmail.com</a></p>
+
+</body>
+</html>
