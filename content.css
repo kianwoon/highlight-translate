@@ -208,6 +208,28 @@
   background-color: #f1f3f4;
 }
 
+/* ---- Replace button ---- */
+
+.ht-replace-btn {
+  position: absolute;
+  top: 6px;
+  left: 55px;
+  background: none;
+  border: 1px solid #d0d0d0;
+  font-size: 12px;
+  line-height: 1;
+  color: #5f6368;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.ht-replace-btn:hover {
+  color: #0d652d;
+  border-color: #0d652d;
+  background-color: #f1f3f4;
+}
+
 /* ---- Source text ---- */
 
 .ht-source {

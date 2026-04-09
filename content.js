@@ -33,6 +33,8 @@
   let injectedSel = null; // selection data relayed from main-world script
   let lastMousePos = null; // Tracks mouse position for icon placement
   let savedText = ""; // Selected text saved when icon appears (prevents race on click)
+  let savedRange = null; // Cloned Range for text replacement
+  let savedEditableEl = null; // contenteditable ancestor for re-querying stale ranges
 
   // ---------------------------------------------------------------------------
   // Shadow DOM initialization for CSS isolation
@@ -85,6 +87,63 @@
       } catch (e) {
         resolve({ success: false, error: 'CONTEXT_INVALID', message: e.message });
       }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ollama proxy — content scripts can fetch http://localhost, service workers can't
+  // ---------------------------------------------------------------------------
+
+  chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+    if (msg && msg.action === "ollama_proxy") {
+      fetch("http://localhost:11434/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(msg.body),
+      })
+      .then(function (r) {
+        if (!r.ok) throw new Error("Ollama HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data || !data.message || !data.message.content) {
+          sendResponse({ success: false, error: "Unexpected response" });
+        } else {
+          sendResponse({ success: true, text: data.message.content });
+        }
+      })
+      .catch(function (e) {
+        sendResponse({ success: false, error: e.message });
+      });
+      return true; // async response
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Text replacement — delegated to main-world script via CustomEvent
+  // ---------------------------------------------------------------------------
+
+  function replaceSelectedText(newText) {
+    if (!savedText && !savedRange) return Promise.resolve(false);
+
+    return new Promise(function (resolve) {
+      console.log("[HT] Replace: delegating to main-world script. savedText:", savedText ? savedText.substring(0, 30) : "(none)");
+
+      // Listen for result from main-world script
+      function onResult(e) {
+        document.removeEventListener("__ht_replace_result", onResult);
+        var success = e.detail && e.detail.success;
+        console.log("[HT] Replace: main-world result:", success);
+        if (success) {
+          savedRange = null;
+          savedEditableEl = null;
+        }
+        resolve(success);
+      }
+      document.addEventListener("__ht_replace_result", onResult);
+
+      // Dispatch replacement request to main-world script
+      document.dispatchEvent(new CustomEvent("__ht_replace", { detail: { text: newText } }));
     });
   }
 
@@ -165,6 +224,13 @@
     copyBtn.textContent = "Copy";
     copyBtn.title = "Copy to clipboard";
 
+    const replaceBtn = document.createElement("button");
+    replaceBtn.className = "ht-replace-btn";
+    replaceBtn.setAttribute("aria-label", "Replace original text");
+    replaceBtn.textContent = "Replace";
+    replaceBtn.title = "Replace selected text with result";
+    replaceBtn.style.display = "none"; // hidden by default, shown per-action
+
     const closeBtn = document.createElement("button");
     closeBtn.className = "ht-close-btn";
     closeBtn.setAttribute("aria-label", "Close");
@@ -180,6 +246,7 @@
     resultDiv.className = "ht-result";
 
     popupEl.appendChild(copyBtn);
+    popupEl.appendChild(replaceBtn);
     popupEl.appendChild(closeBtn);
     popupEl.appendChild(sourceDiv);
     popupEl.appendChild(loadingDiv);
@@ -195,6 +262,24 @@
         setTimeout(function () {
           copyBtn.textContent = "Copy";
         }, 1500);
+      });
+    });
+
+    replaceBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var resultEl = popupEl.querySelector(".ht-result");
+      if (!resultEl || !resultEl.textContent) return;
+
+      replaceBtn.textContent = "...";
+      replaceSelectedText(resultEl.textContent).then(function (success) {
+        if (success) {
+          closePopup();
+        } else {
+          replaceBtn.textContent = "Failed";
+          setTimeout(function () {
+            replaceBtn.textContent = "Replace";
+          }, 1500);
+        }
       });
     });
 
@@ -341,6 +426,49 @@
 
     savedText = text; // Save for click handler — selection may be cleared by the click itself
 
+    // Clone the current selection Range for potential text replacement
+    savedRange = null;
+    savedEditableEl = null;
+    const _sel = window.getSelection();
+    if (_sel && _sel.rangeCount > 0 && !_sel.isCollapsed) {
+      try { savedRange = _sel.getRangeAt(0).cloneRange(); } catch (e) { /* not clonable */ }
+      // Save the contenteditable ancestor so we can re-query text if savedRange goes stale
+      if (savedRange) {
+        let _node = savedRange.commonAncestorContainer;
+        if (_node && _node.nodeType === Node.TEXT_NODE) _node = _node.parentNode;
+        while (_node && _node !== document.body) {
+          if (_node.isContentEditable) { savedEditableEl = _node; break; }
+          _node = _node.parentNode;
+        }
+      }
+    }
+
+    // If content script couldn't see the selection (e.g., LinkedIn, Brave),
+    // try to find the editable element via the main-world relayed marker.
+    if (!savedEditableEl && injectedSel && injectedSel.editableId) {
+      var el = document.querySelector('[data-ht-editable="' + injectedSel.editableId + '"]');
+      if (el) {
+        savedEditableEl = el;
+        console.log("[HT] Found editable element via main-world marker:", injectedSel.editableId);
+      } else {
+        console.log("[HT] marker not found in DOM:", injectedSel.editableId);
+      }
+    }
+
+    // Fallback: search all contenteditable or marked elements for the selected text.
+    if (!savedEditableEl && savedText) {
+      var candidates = document.querySelectorAll("[contenteditable='true'], [contenteditable=''], [data-ht-editable], [role='textbox'], textarea");
+      for (var i = 0; i < candidates.length; i++) {
+        if (candidates[i].textContent && candidates[i].textContent.indexOf(savedText) !== -1) {
+          savedEditableEl = candidates[i];
+          console.log("[HT] Found editable element via fallback search:", candidates[i].tagName);
+          break;
+        }
+      }
+    }
+
+    console.log("[HT] showIcon: savedRange:", !!savedRange, "savedEditableEl:", !!savedEditableEl, "savedText:", savedText.substring(0, 30));
+
     const icon = createIcon();
     const { top, left } = getSelectionPosition();
     icon.style.top = top + "px";
@@ -431,14 +559,16 @@
     popupEl.style.left = left + "px";
   }
 
-  function showPopup(translatedText, sourceText) {
+  function showPopup(translatedText, sourceText, actionType) {
     const popup = createPopup();
     const sourceEl = popup.querySelector(".ht-source");
     const loadingEl = popup.querySelector(".ht-loading");
     const resultEl = popup.querySelector(".ht-result");
+    const replaceBtn = popup.querySelector(".ht-replace-btn");
 
     loadingEl.style.display = "none";
     sourceEl.style.display = sourceText ? "block" : "none";
+    replaceBtn.style.display = (actionType === "translate" || actionType === "improve") ? "" : "none";
 
     if (sourceText && sourceText.length > MAX_SOURCE_LENGTH) {
       sourceText = sourceText.substring(0, MAX_SOURCE_LENGTH) + "...";
@@ -490,6 +620,7 @@
     removeSummaryIcon();
     clearDismissTimer();
     isTranslating = false;
+    savedRange = null;
   }
 
   function resetDismissTimer() {
@@ -553,7 +684,7 @@
       }
 
       if (response.success) {
-        showPopup(response.translatedText, text);
+        showPopup(response.translatedText, text, "translate");
       } else {
         var fallback =
           response && response.translatedText
@@ -584,7 +715,7 @@
       }
 
       if (response.success) {
-        showPopup(response.translatedText, text);
+        showPopup(response.translatedText, text, "improve");
       } else if (response && response.error === "NO_API_KEY") {
         var msg =
           "No AI provider configured. " +
