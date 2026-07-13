@@ -245,8 +245,12 @@
     const resultDiv = document.createElement("div");
     resultDiv.className = "ht-result";
 
-    popupEl.appendChild(copyBtn);
-    popupEl.appendChild(replaceBtn);
+    const actionsDiv = document.createElement("div");
+    actionsDiv.className = "ht-actions";
+    actionsDiv.appendChild(copyBtn);
+    actionsDiv.appendChild(replaceBtn);
+
+    popupEl.appendChild(actionsDiv);
     popupEl.appendChild(closeBtn);
     popupEl.appendChild(sourceDiv);
     popupEl.appendChild(loadingDiv);

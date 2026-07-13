@@ -186,12 +186,21 @@
   background-color: #f1f3f4;
 }
 
-/* ---- Copy button ---- */
+/* ---- Action button row (Copy / Replace) ---- */
+/* Flex row with a gap so buttons never overlap, regardless of label width
+   (e.g. "Copy" growing to "Copied!", "Replace" shrinking to "..."/"Failed"). */
 
-.ht-copy-btn {
+.ht-actions {
   position: absolute;
   top: 6px;
   left: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- Copy button ---- */
+
+.ht-copy-btn {
   background: none;
   border: 1px solid #d0d0d0;
   font-size: 12px;
@@ -200,6 +209,7 @@
   cursor: pointer;
   padding: 2px 8px;
   border-radius: 4px;
+  white-space: nowrap;
 }
 
 .ht-copy-btn:hover {
@@ -211,9 +221,6 @@
 /* ---- Replace button ---- */
 
 .ht-replace-btn {
-  position: absolute;
-  top: 6px;
-  left: 55px;
   background: none;
   border: 1px solid #d0d0d0;
   font-size: 12px;
@@ -222,6 +229,7 @@
   cursor: pointer;
   padding: 2px 8px;
   border-radius: 4px;
+  white-space: nowrap;
 }
 
 .ht-replace-btn:hover {

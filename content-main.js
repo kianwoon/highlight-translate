@@ -98,6 +98,137 @@
     return false;
   }
 
+  /**
+   * Checks whether `newText` actually landed in the live DOM under `target`.
+   * A strategy's own return value (execCommand) or defaultPrevented flag
+   * (synthetic paste) only proves the DOM was touched — NOT that a
+   * framework-managed editor (React/Draft.js-style, e.g. X.com's composer)
+   * updated its own internal content model. If the model stays stale, the
+   * editor silently reverts the DOM back to it on its next re-render
+   * (e.g. when the user clicks back into the field). Checking the actual
+   * textContent is the only reliable success signal here.
+   */
+  function verifyReplacement(target, newText) {
+    try {
+      return target.textContent.indexOf(newText) !== -1;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** Runs the replacement strategies in order, verifying each before moving on. */
+  function finishReplace(range, target, newText) {
+    var strategy = "none";
+    var replaced = false;
+    // Snapshot the original selected text so we can detect "something already
+    // changed the DOM, even if verifyReplacement's exact match missed it"
+    // (e.g. an editor trims/normalizes whitespace on insert) — without this,
+    // a false-negative verify would run the NEXT strategy too and double-insert.
+    var originalText = "";
+    try { originalText = range.toString(); } catch (e) { /* ignore */ }
+
+    // Strategy 1: Synthetic paste event FIRST. Framework-managed rich
+    // editors (X.com and similar React/contenteditable editors) read
+    // e.clipboardData in their own paste handler and update their internal
+    // model correctly — this is the one path that reliably stays in sync
+    // with such editors, so it's tried before execCommand. On plain
+    // (non-framework) contenteditables this is a silent no-op (untrusted
+    // paste events aren't processed natively), and verification below
+    // correctly falls through to the next strategy in that case.
+    try {
+      var dt = new DataTransfer();
+      dt.setData("text/plain", newText);
+      var pasteEvent = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt
+      });
+      target.dispatchEvent(pasteEvent);
+    } catch (e) { /* ClipboardEvent not available */ }
+
+    if (verifyReplacement(target, newText)) {
+      replaced = true;
+      strategy = "paste";
+    }
+
+    // Bail out before any further destructive strategy if the original text
+    // is already gone but didn't verify as our exact newText — that means
+    // strategy 1 (or the page itself) already changed something, and firing
+    // another full insertion strategy risks inserting newText a second time.
+    var safeToRetry = !originalText || target.textContent.indexOf(originalText) !== -1;
+
+    // Strategy 2: execCommand insertText. NOTE: a truthy return here does
+    // NOT prove a framework editor's internal state was updated — only
+    // that the DOM was mutated. We verify actual content instead of
+    // trusting the return value (see verifyReplacement doc above).
+    if (!replaced && safeToRetry) {
+      try {
+        document.execCommand("insertText", false, newText);
+      } catch (e) { /* not available */ }
+
+      if (verifyReplacement(target, newText)) {
+        replaced = true;
+        strategy = "execCommand";
+      }
+      safeToRetry = !originalText || target.textContent.indexOf(originalText) !== -1;
+    }
+
+    // Strategy 3: Direct DOM manipulation — last resort. Works reliably on
+    // plain (non-framework) contenteditable/text, but framework-managed
+    // editors that don't recognize the raw mutation may still revert it.
+    if (!replaced && safeToRetry) {
+      try {
+        target.dispatchEvent(new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: newText
+        }));
+      } catch (e) { /* ignore */ }
+
+      try {
+        // Use the live selection's range if the framework normalized it
+        // during the deferral below; fall back to the originally saved one.
+        var sel = window.getSelection();
+        var liveRange = (sel && sel.rangeCount > 0) ? sel.getRangeAt(0) : range;
+        liveRange.deleteContents();
+        var insertedNode = document.createTextNode(newText);
+        liveRange.insertNode(insertedNode);
+
+        // Leave the cursor right after the inserted text so the field stays editable.
+        liveRange.setStartAfter(insertedNode);
+        liveRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(liveRange);
+      } catch (e) { /* ignore */ }
+
+      try {
+        target.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: newText
+        }));
+      } catch (e) { /* ignore */ }
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+
+      if (verifyReplacement(target, newText)) {
+        replaced = true;
+        strategy = "rawDOM";
+      }
+    }
+    // Note: strategies 1 (paste) and 2 (execCommand) already leave the
+    // browser/editor's own caret correctly positioned after the inserted
+    // text — we must NOT clear the selection after them, or the field is
+    // left with no active cursor and appears uneditable until re-clicked.
+
+    console.log("[HT-MAIN] replacement result:", replaced, "strategy:", strategy);
+    if (replaced) {
+      savedSelRange = null;
+      savedSelText = "";
+    }
+    document.dispatchEvent(new CustomEvent("__ht_replace_result", { detail: { success: replaced, strategy: strategy } }));
+  }
+
   // Listen for replace requests from the isolated-world content script.
   document.addEventListener("__ht_replace", function (e) {
     var newText = e.detail && e.detail.text;
@@ -142,67 +273,17 @@
       var target = range.commonAncestorContainer;
       if (target.nodeType === Node.TEXT_NODE) target = target.parentNode;
 
-      // Strategy 1: Try execCommand insertText (editors recognize this)
-      var replaced = false;
-      try {
-        if (document.execCommand("insertText", false, newText)) {
-          console.log("[HT-MAIN] execCommand insertText succeeded");
-          replaced = true;
-        }
-      } catch (e) { /* not available */ }
-
-      // Strategy 2: Synthetic paste event (editors handle paste natively)
-      if (!replaced) {
-        try {
-          var dt = new DataTransfer();
-          dt.setData("text/plain", newText);
-          var pasteEvent = new ClipboardEvent("paste", {
-            bubbles: true,
-            cancelable: true,
-            clipboardData: dt
-          });
-          target.dispatchEvent(pasteEvent);
-          if (pasteEvent.defaultPrevented) {
-            console.log("[HT-MAIN] paste event handled by editor");
-            replaced = true;
-          }
-        } catch (e) { /* ClipboardEvent not available */ }
-      }
-
-      // Strategy 3: Direct DOM manipulation + InputEvent notification
-      if (!replaced) {
-        // Dispatch beforeinput BEFORE modifying DOM (standard editing pipeline)
-        try {
-          target.dispatchEvent(new InputEvent("beforeinput", {
-            bubbles: true,
-            cancelable: true,
-            inputType: "insertText",
-            data: newText
-          }));
-        } catch (e) { /* ignore */ }
-
-        // Modify the DOM
-        range.deleteContents();
-        range.insertNode(document.createTextNode(newText));
-
-        // Dispatch InputEvent AFTER modifying DOM
-        try {
-          target.dispatchEvent(new InputEvent("input", {
-            bubbles: true,
-            inputType: "insertText",
-            data: newText
-          }));
-        } catch (e) { /* ignore */ }
-        target.dispatchEvent(new Event("change", { bubbles: true }));
-        console.log("[HT-MAIN] direct DOM replacement + InputEvent");
-      }
-
-      sel.removeAllRanges();
-
-      console.log("[HT-MAIN] replacement succeeded");
-      savedSelRange = null;
-      savedSelText = "";
-      document.dispatchEvent(new CustomEvent("__ht_replace_result", { detail: { success: true } }));
+      // Defer one tick before mutating: framework-managed editors (React/
+      // Draft.js-style, e.g. X.com's composer) track selection internally
+      // via their own "selectionchange" listener, which fires as a queued
+      // task — not synchronously. Mutating in the same tick as
+      // sel.addRange() above can act against the editor's still-stale
+      // internal cursor position, leaving its content model unsynced (the
+      // DOM looks right until the editor's next re-render, e.g. on click,
+      // silently reverts it). Deferring lets that listener run first.
+      setTimeout(function () {
+        finishReplace(range, target, newText);
+      }, 0);
     } catch (e) {
       console.log("[HT-MAIN] replacement failed:", e.message);
       document.dispatchEvent(new CustomEvent("__ht_replace_result", { detail: { success: false } }));
