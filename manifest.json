@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Highlight Translate",
-  "version": "1.1.3",
-  "description": "Highlight text to translate, improve, reply, or summarize with AI",
+  "name": "UniLingo",
+  "version": "2.1",
+  "description": "Highlight text to translate, improve, reply, summarize, or explain with your choice of AI provider",
   "permissions": [
     "storage"
   ],

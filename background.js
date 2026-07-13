@@ -1,11 +1,12 @@
 /**
- * Background service worker for Highlight Translate.
+ * Background service worker for UniLingo.
  * Handles translation requests by calling the Google Translate API.
  * Handles improve requests by calling the selected AI provider API.
  */
 
-const TRANSLATE_URL =
-  "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=";
+const TRANSLATE_ENDPOINT = "https://translate.googleapis.com/translate_a/single";
+const DEFAULT_TRANSLATION_TARGET = "zh-CN";
+const CHINESE_TRANSLATION_TARGET = "en";
 
 const PROVIDER_DEFAULTS = {
   gemini: {
@@ -35,7 +36,7 @@ const PROVIDER_DEFAULTS = {
 (async function migrateOldSettings() {
   const { geminiApiKey, provider } = await chrome.storage.local.get(["geminiApiKey", "provider"]);
   if (geminiApiKey && !provider) {
-    console.log("[Highlight Translate] Migrating old geminiApiKey to new format");
+    console.log("[UniLingo] Migrating old geminiApiKey to new format");
     await chrome.storage.local.set({
       provider: "gemini",
       apiKey: geminiApiKey,
@@ -79,7 +80,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true, translatedText });
       })
       .catch((error) => {
-        console.error("[Highlight Translate] Translation failed:", error);
+        console.error("[UniLingo] Translation failed:", error);
         sendResponse({
           success: false,
           translatedText: "Translation failed. Please try again.",
@@ -89,12 +90,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "improve" && message.text) {
-    handleImprove(message.text)
+    handleImprove(message.text, message.languageCode)
       .then((translatedText) => {
         sendResponse({ success: true, translatedText });
       })
       .catch((error) => {
-        console.error("[Highlight Translate] Improve failed:", error, error.details || "");
+        console.error("[UniLingo] Improve failed:", error, error.details || "");
         if (error.message === "NO_API_KEY") {
           sendResponse({
             success: false,
@@ -118,12 +119,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "reply" && message.text) {
-    handleReply(message.text)
+    handleReply(message.text, message.languageCode)
       .then((translatedText) => {
         sendResponse({ success: true, translatedText });
       })
       .catch((error) => {
-        console.error("[Highlight Translate] Reply failed:", error, error.details || "");
+        console.error("[UniLingo] Reply failed:", error, error.details || "");
         if (error.message === "NO_API_KEY") {
           sendResponse({
             success: false,
@@ -147,12 +148,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "summarize" && message.text) {
-    handleSummarize(message.text)
+    handleSummarize(message.text, message.languageCode)
       .then((translatedText) => {
         sendResponse({ success: true, translatedText });
       })
       .catch((error) => {
-        console.error("[Highlight Translate] Summarize failed:", error, error.details || "");
+        console.error("[UniLingo] Summarize failed:", error, error.details || "");
         if (error.message === "NO_API_KEY") {
           sendResponse({
             success: false,
@@ -176,13 +177,83 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function handleTranslation(text) {
-  const url = TRANSLATE_URL + encodeURIComponent(text);
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+function getBaseLanguage(languageCode) {
+  if (!languageCode) return "";
+  try {
+    return new Intl.Locale(languageCode).language;
+  } catch (error) {
+    return languageCode;
   }
-  const data = await response.json();
+}
+
+function getDetectedLanguage(data) {
+  return Array.isArray(data) && typeof data[2] === "string" ? data[2] : "";
+}
+
+function getTranslationTargetForDetectedLanguage(detectedLanguage) {
+  return getBaseLanguage(detectedLanguage) === "zh"
+    ? CHINESE_TRANSLATION_TARGET
+    : DEFAULT_TRANSLATION_TARGET;
+}
+
+function getLanguageDisplayName(languageCode) {
+  const baseLanguage = getBaseLanguage(languageCode);
+  if (!baseLanguage) return "";
+  try {
+    const displayNames = new Intl.DisplayNames(["en"], { type: "language" });
+    return displayNames.of(baseLanguage) || baseLanguage;
+  } catch (error) {
+    return baseLanguage;
+  }
+}
+
+function buildLanguageInstruction(languageCode) {
+  const languageName = getLanguageDisplayName(languageCode);
+  if (!languageName) {
+    return "Return the result in the same language as the selected text.";
+  }
+  return `The selected text was detected as ${languageName}. Return the result in ${languageName}.`;
+}
+
+function buildImproveDefaultPrompt(languageCode) {
+  return [
+    "Improve the selected text while preserving its meaning.",
+    "Fix grammar, spelling, punctuation, wording, fluency, and readability in a natural human tone.",
+    buildLanguageInstruction(languageCode),
+    "Return ONLY the improved text, nothing else.",
+  ].join(" ");
+}
+
+function buildReplyDefaultPrompt(languageCode) {
+  return [
+    "Write a professional, concise reply to the selected message.",
+    "Match the tone and context.",
+    buildLanguageInstruction(languageCode),
+    "Return ONLY the reply text, nothing else.",
+  ].join(" ");
+}
+
+function buildSummarizeDefaultPrompt(languageCode) {
+  return [
+    "Summarize the selected text as a concise TL;DR with bullet points.",
+    "Each bullet point must start with \"\u2022\".",
+    buildLanguageInstruction(languageCode),
+    "Return ONLY the bullet points, nothing else.",
+  ].join(" ");
+}
+
+function buildTranslationUrl(text, targetLanguage) {
+  const params = new URLSearchParams({
+    client: "gtx",
+    sl: "auto",
+    tl: targetLanguage,
+    dt: "t",
+    q: text,
+  });
+  return `${TRANSLATE_ENDPOINT}?${params.toString()}`;
+}
+
+function extractTranslatedText(data) {
   if (!data || !Array.isArray(data[0])) {
     throw new Error("Unexpected API response format");
   }
@@ -196,7 +267,29 @@ async function handleTranslation(text) {
   return translated;
 }
 
-async function handleImprove(text) {
+async function fetchTranslation(text, targetLanguage) {
+  const url = buildTranslationUrl(text, targetLanguage);
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+async function handleTranslation(text) {
+  const initialData = await fetchTranslation(text, DEFAULT_TRANSLATION_TARGET);
+  const detectedLanguage = getDetectedLanguage(initialData);
+  const targetLanguage = getTranslationTargetForDetectedLanguage(detectedLanguage);
+
+  if (targetLanguage === DEFAULT_TRANSLATION_TARGET) {
+    return extractTranslatedText(initialData);
+  }
+
+  const translatedData = await fetchTranslation(text, targetLanguage);
+  return extractTranslatedText(translatedData);
+}
+
+async function handleImprove(text, languageCode) {
   const { provider, apiKey, model, customEndpoint, customPrompt } =
     await chrome.storage.local.get(["provider", "apiKey", "model", "customEndpoint", "customPrompt"]);
 
@@ -205,6 +298,7 @@ async function handleImprove(text) {
   }
 
   const resolvedModel = model || PROVIDER_DEFAULTS[provider].model;
+  const effectivePrompt = customPrompt || buildImproveDefaultPrompt(languageCode);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000);
 
@@ -212,27 +306,27 @@ async function handleImprove(text) {
     let result;
     switch (provider) {
       case "gemini":
-        result = await callGemini(apiKey, resolvedModel, text, customPrompt, controller.signal);
+        result = await callGemini(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "openai":
-        result = await callOpenAI(apiKey, resolvedModel, text, customPrompt, controller.signal);
+        result = await callOpenAI(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "anthropic":
-        result = await callAnthropic(apiKey, resolvedModel, text, customPrompt, controller.signal);
+        result = await callAnthropic(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "openrouter":
-        result = await callOpenRouter(apiKey, resolvedModel, text, customPrompt, controller.signal);
+        result = await callOpenRouter(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "ollama":
-        result = await callOllama(resolvedModel, text, customPrompt, controller.signal);
+        result = await callOllama(resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "codingplan":
         if (!customEndpoint) throw new Error("Coding Plan endpoint not configured");
-        result = await callCodingPlan(apiKey, customEndpoint, resolvedModel, text, customPrompt, controller.signal);
+        result = await callCodingPlan(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "custom":
         if (!customEndpoint) throw new Error("Custom endpoint not configured");
-        result = await callCustom(apiKey, customEndpoint, resolvedModel, text, customPrompt, controller.signal);
+        result = await callCustom(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       default:
         throw new Error("Unknown provider: " + provider);
@@ -241,7 +335,6 @@ async function handleImprove(text) {
     return result;
   } catch (error) {
     clearTimeout(timeoutId);
-    console.error("[Highlight Translate] handleImprove error details:", error.name, error.message, error);
     if (error.message === "API_ERROR") throw error; // already wrapped by makeApiError
     if (error.name === "AbortError") {
       throw makeApiError("Request timed out (30s). Check your connection.");
@@ -253,7 +346,7 @@ async function handleImprove(text) {
   }
 }
 
-async function handleReply(text) {
+async function handleReply(text, languageCode) {
   const { provider, apiKey, model, customEndpoint, replyPrompt } =
     await chrome.storage.local.get(["provider", "apiKey", "model", "customEndpoint", "replyPrompt"]);
 
@@ -262,6 +355,7 @@ async function handleReply(text) {
   }
 
   const resolvedModel = model || PROVIDER_DEFAULTS[provider].model;
+  const effectivePrompt = replyPrompt || buildReplyDefaultPrompt(languageCode);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000);
 
@@ -269,27 +363,27 @@ async function handleReply(text) {
     let result;
     switch (provider) {
       case "gemini":
-        result = await callGeminiReply(apiKey, resolvedModel, text, replyPrompt, controller.signal);
+        result = await callGeminiReply(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "openai":
-        result = await callOpenAIReply(apiKey, resolvedModel, text, replyPrompt, controller.signal);
+        result = await callOpenAIReply(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "anthropic":
-        result = await callAnthropicReply(apiKey, resolvedModel, text, replyPrompt, controller.signal);
+        result = await callAnthropicReply(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "openrouter":
-        result = await callOpenRouterReply(apiKey, resolvedModel, text, replyPrompt, controller.signal);
+        result = await callOpenRouterReply(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "ollama":
-        result = await callOllamaReply(resolvedModel, text, replyPrompt, controller.signal);
+        result = await callOllamaReply(resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "codingplan":
         if (!customEndpoint) throw new Error("Coding Plan endpoint not configured");
-        result = await callCodingPlanReply(apiKey, customEndpoint, resolvedModel, text, replyPrompt, controller.signal);
+        result = await callCodingPlanReply(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "custom":
         if (!customEndpoint) throw new Error("Custom endpoint not configured");
-        result = await callCustomReply(apiKey, customEndpoint, resolvedModel, text, replyPrompt, controller.signal);
+        result = await callCustomReply(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       default:
         throw new Error("Unknown provider: " + provider);
@@ -308,7 +402,7 @@ async function handleReply(text) {
   }
 }
 
-async function handleSummarize(text) {
+async function handleSummarize(text, languageCode) {
   const { provider, apiKey, model, customEndpoint, summaryPrompt } =
     await chrome.storage.local.get(["provider", "apiKey", "model", "customEndpoint", "summaryPrompt"]);
 
@@ -317,6 +411,7 @@ async function handleSummarize(text) {
   }
 
   const resolvedModel = model || PROVIDER_DEFAULTS[provider].model;
+  const effectivePrompt = summaryPrompt || buildSummarizeDefaultPrompt(languageCode);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000);
 
@@ -324,27 +419,27 @@ async function handleSummarize(text) {
     let result;
     switch (provider) {
       case "gemini":
-        result = await callGeminiSummarize(apiKey, resolvedModel, text, summaryPrompt, controller.signal);
+        result = await callGeminiSummarize(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "openai":
-        result = await callOpenAISummarize(apiKey, resolvedModel, text, summaryPrompt, controller.signal);
+        result = await callOpenAISummarize(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "anthropic":
-        result = await callAnthropicSummarize(apiKey, resolvedModel, text, summaryPrompt, controller.signal);
+        result = await callAnthropicSummarize(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "openrouter":
-        result = await callOpenRouterSummarize(apiKey, resolvedModel, text, summaryPrompt, controller.signal);
+        result = await callOpenRouterSummarize(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "ollama":
-        result = await callOllamaSummarize(resolvedModel, text, summaryPrompt, controller.signal);
+        result = await callOllamaSummarize(resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "codingplan":
         if (!customEndpoint) throw new Error("Coding Plan endpoint not configured");
-        result = await callCodingPlanSummarize(apiKey, customEndpoint, resolvedModel, text, summaryPrompt, controller.signal);
+        result = await callCodingPlanSummarize(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       case "custom":
         if (!customEndpoint) throw new Error("Custom endpoint not configured");
-        result = await callCustomSummarize(apiKey, customEndpoint, resolvedModel, text, summaryPrompt, controller.signal);
+        result = await callCustomSummarize(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       default:
         throw new Error("Unknown provider: " + provider);
@@ -530,24 +625,36 @@ async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, max
   if (!model) throw new Error("Model required for AI Coding Plan");
 
   const useAnthropic = isAnthropicFormat(endpoint);
-  const url = useAnthropic
-    ? `${endpoint}/v1/messages`
-    : `${endpoint}/chat/completions`;
+  // Use endpoint URL as-is — user provides the full URL including path
+  const url = endpoint;
 
+  const sessionId = crypto.randomUUID();
   const headers = {
     "Content-Type": "application/json",
     "User-Agent": "Claude-Code/1.0",
-    "x-session-id": crypto.randomUUID(),
+    "x-session-id": sessionId,
+    "x-claude-code-session-id": sessionId,
+    "x-session-name": "highlight-translate",
+    "Accept": "application/json",
   };
 
   let body;
   if (useAnthropic) {
     headers["x-api-key"] = apiKey;
     headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-beta"] = "prompt-caching-2024-07-31,token-counting-2024-11-01";
+    // Anthropic format: system as top-level field, content as block arrays
+    const systemMsg = messages.find(m => m.role === "system");
+    const userMessages = messages.filter(m => m.role !== "system").map(m => ({
+      role: m.role,
+      content: [{ type: "text", text: m.content }],
+    }));
     body = JSON.stringify({
       model,
       max_tokens: maxTokens,
-      messages,
+      system: [{ type: "text", text: systemMsg?.content || "" }],
+      messages: userMessages,
+      stream: false,
     });
   } else {
     headers["Authorization"] = `Bearer ${apiKey}`;
@@ -571,15 +678,25 @@ async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, max
   if (!response.ok) throw makeApiError(`HTTP ${response.status}: ${response.statusText}`);
 
   const data = await response.json();
-  if (useAnthropic) {
-    // Anthropic format: content is array of blocks (text, thinking, etc.)
-    const textBlock = (data?.content || []).find(b => b.type === "text");
+
+  // Try Anthropic format first (content array with text blocks)
+  if (Array.isArray(data?.content)) {
+    const textBlock = data.content.find(b => b.type === "text");
     if (textBlock?.text) return textBlock.text;
-    throw new Error("Unexpected API response format");
-  } else {
-    if (!data?.choices?.[0]?.message?.content) throw new Error("Unexpected API response format");
+  }
+
+  // Try OpenAI format (choices array)
+  if (data?.choices?.[0]?.message?.content) {
     return data.choices[0].message.content;
   }
+
+  // Fallback: try raw content string (some APIs return { content: "text" })
+  if (typeof data?.content === "string") return data.content;
+
+  // Fallback: try text field directly
+  if (typeof data?.text === "string") return data.text;
+
+  throw new Error("Unexpected API response format: " + JSON.stringify(data).slice(0, 200));
 }
 
 const IMPROVE_DEFAULT_PROMPT = "Fix all grammar, spelling, and punctuation errors. Then rewrite the text to sound natural, human-written, and conversational. Use varied sentence structure and contractions where appropriate. Keep the same meaning. Return ONLY the improved text, nothing else.";

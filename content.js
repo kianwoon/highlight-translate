@@ -1,5 +1,5 @@
 /**
- * Content script for Highlight Translate.
+ * Content script for UniLingo.
  * Shows a floating icon when text is selected, and displays translation popup on click.
  */
 
@@ -35,28 +35,43 @@
   let savedText = ""; // Selected text saved when icon appears (prevents race on click)
   let savedRange = null; // Cloned Range for text replacement
   let savedEditableEl = null; // contenteditable ancestor for re-querying stale ranges
+  let iconLabelRequestId = 0;
+  let selectedLanguageText = "";
+  let selectedLanguageCode = "";
 
   // ---------------------------------------------------------------------------
   // Shadow DOM initialization for CSS isolation
   // ---------------------------------------------------------------------------
 
+  function createHtmlElement(tagName) {
+    return document.createElementNS("http://www.w3.org/1999/xhtml", tagName);
+  }
+
   function initShadowDOM() {
-    shadowHost = document.createElement("div");
+    if (!document.body) {
+      return false;
+    }
+
+    shadowHost = createHtmlElement("div");
     shadowHost.id = "ht-shadow-host";
+    if (!shadowHost.style) {
+      shadowHost = null;
+      return false;
+    }
+
     // Reset all inherited CSS properties to prevent host page styles from leaking in
     // (e.g., color: white from user-injected CSS), then override with our specific values
     shadowHost.style.cssText = "all:initial; position:fixed; top:0; left:0; width:0; height:0; pointer-events:auto; z-index:2147483647;";
     shadowRoot = shadowHost.attachShadow({ mode: "open" });
 
-    // Load content.css synchronously into shadow root
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", chrome.runtime.getURL("content.css"), false);
-    xhr.send();
-    var styleEl = document.createElement("style");
-    styleEl.textContent = xhr.responseText;
-    shadowRoot.appendChild(styleEl);
+    // Load content.css into shadow root via <link> (sync XHR blocked by MV3 permissions policy)
+    var linkEl = createHtmlElement("link");
+    linkEl.rel = "stylesheet";
+    linkEl.href = chrome.runtime.getURL("content.css");
+    shadowRoot.appendChild(linkEl);
 
     document.body.appendChild(shadowHost);
+    return true;
   }
 
   // ---------------------------------------------------------------------------
@@ -71,17 +86,26 @@
   // Safe message wrapper
   // ---------------------------------------------------------------------------
 
-  function sendMessageSafe(action, text) {
+  function sendMessageSafe(action, text, extra) {
     return new Promise((resolve) => {
       try {
+        if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+          resolve({ success: false, error: 'CONTEXT_INVALID', message: 'Extension context invalidated' });
+          return;
+        }
+        const payload = Object.assign({ action: action, text: text }, extra || {});
         chrome.runtime.sendMessage(
-          { action: action, text: text },
+          payload,
           function (response) {
-            if (chrome.runtime.lastError) {
-              resolve({ success: false, error: 'LAST_ERROR', message: chrome.runtime.lastError.message });
-              return;
+            try {
+              if (chrome.runtime.lastError) {
+                resolve({ success: false, error: 'LAST_ERROR', message: chrome.runtime.lastError.message });
+                return;
+              }
+              resolve(response || {});
+            } catch (error) {
+              resolve({ success: false, error: 'CONTEXT_INVALID', message: error.message });
             }
-            resolve(response || {});
           }
         );
       } catch (e) {
@@ -165,6 +189,73 @@
     console.log("[HT] Appending icon to shadow root in", window.location.hostname);
     shadowRoot.appendChild(iconEl);
     return iconEl;
+  }
+
+  function getBaseLanguage(languageCode) {
+    if (!languageCode) return "";
+    try {
+      return new Intl.Locale(languageCode).language;
+    } catch (error) {
+      return languageCode;
+    }
+  }
+
+  function setTranslateIconForLanguage(languageCode) {
+    if (!iconEl) return;
+    const isChinese = getBaseLanguage(languageCode) === "zh";
+    iconEl.textContent = isChinese ? "Eng" : "\u8BD1";
+    iconEl.title = isChinese ? "Translate to English" : "Translate to Chinese";
+  }
+
+  function detectSelectedLanguage(text) {
+    return new Promise(function (resolve) {
+      try {
+        if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id || !chrome.i18n || typeof chrome.i18n.detectLanguage !== "function") {
+          resolve("");
+          return;
+        }
+
+        chrome.i18n.detectLanguage(text, function (result) {
+          try {
+            if (chrome.runtime.lastError || !result || !Array.isArray(result.languages)) {
+              resolve("");
+              return;
+            }
+            resolve(result.languages.length ? result.languages[0].language : "");
+          } catch (error) {
+            resolve("");
+          }
+        });
+      } catch (error) {
+        resolve("");
+      }
+    });
+  }
+
+  function refreshTranslateIconLabel(text) {
+    const requestId = ++iconLabelRequestId;
+    selectedLanguageText = text;
+    selectedLanguageCode = "";
+    setTranslateIconForLanguage("");
+
+    detectSelectedLanguage(text).then(function (languageCode) {
+      if (requestId !== iconLabelRequestId || text !== savedText || !iconEl) return;
+      selectedLanguageCode = languageCode;
+      setTranslateIconForLanguage(languageCode);
+    });
+  }
+
+  function getLanguageHintForText(text) {
+    if (selectedLanguageText === text && selectedLanguageCode) {
+      return Promise.resolve(selectedLanguageCode);
+    }
+    return detectSelectedLanguage(text).then(function (languageCode) {
+      if (text === savedText) {
+        selectedLanguageText = text;
+        selectedLanguageCode = languageCode;
+      }
+      return languageCode;
+    });
   }
 
   function createHumanizeIcon() {
@@ -394,19 +485,15 @@
 
     if (!bestRect) return { top: 0, left: 0 };
 
-    // Place icon at the end of the selection.
-    let top = bestRect.bottom + 4;
+    // Return the selection bottom-right corner; showIcon() places icons upward from here.
+    let top = bestRect.bottom;
     let left = bestRect.right + 4;
 
     // Clamp within viewport.
     const vw = window.innerWidth;
-    const vh = window.innerHeight;
 
     if (left + 36 > vw) {
       left = vw - 40;
-    }
-    if (top + 36 > vh) {
-      top = bestRect.top - 36;
     }
 
     return { top, left };
@@ -470,23 +557,30 @@
     console.log("[HT] showIcon: savedRange:", !!savedRange, "savedEditableEl:", !!savedEditableEl, "savedText:", savedText.substring(0, 30));
 
     const icon = createIcon();
+    refreshTranslateIconLabel(text);
     const { top, left } = getSelectionPosition();
-    icon.style.top = top + "px";
+    const GAP = 36;
+    const ICON_H = 28; // icon height in px
+
+    // Icons go upward from selection bottom — last icon top edge at selection line.
+    const base = top - ICON_H;
+
+    icon.style.top = (base - GAP * 3) + "px";
     icon.style.left = left + "px";
     icon.style.display = "block";
 
     const humanizeIcon = createHumanizeIcon();
-    humanizeIcon.style.top = (top + 36) + "px";
+    humanizeIcon.style.top = (base - GAP * 2) + "px";
     humanizeIcon.style.left = left + "px";
     humanizeIcon.style.display = "block";
 
     const replyIcon = createReplyIcon();
-    replyIcon.style.top = (top + 72) + "px";
+    replyIcon.style.top = (base - GAP) + "px";
     replyIcon.style.left = left + "px";
     replyIcon.style.display = "block";
 
     const summaryIcon = createSummaryIcon();
-    summaryIcon.style.top = (top + 108) + "px";
+    summaryIcon.style.top = base + "px";
     summaryIcon.style.left = left + "px";
     summaryIcon.style.display = "block";
 
@@ -706,7 +800,7 @@
     isTranslating = true;
     showLoading();
 
-    sendMessageSafe("improve", text).then((response) => {
+    getLanguageHintForText(text).then((languageCode) => sendMessageSafe("improve", text, { languageCode: languageCode })).then((response) => {
       isTranslating = false;
 
       if (response.error === 'CONTEXT_INVALID') {
@@ -755,7 +849,7 @@
     isTranslating = true;
     showLoading();
 
-    sendMessageSafe("reply", text).then((response) => {
+    getLanguageHintForText(text).then((languageCode) => sendMessageSafe("reply", text, { languageCode: languageCode })).then((response) => {
       isTranslating = false;
 
       if (response.error === 'CONTEXT_INVALID') {
@@ -804,7 +898,7 @@
     isTranslating = true;
     showLoading();
 
-    sendMessageSafe("summarize", text).then((response) => {
+    getLanguageHintForText(text).then((languageCode) => sendMessageSafe("summarize", text, { languageCode: languageCode })).then((response) => {
       isTranslating = false;
 
       if (response.error === 'CONTEXT_INVALID') {
@@ -905,7 +999,10 @@
   // Init
   // ---------------------------------------------------------------------------
 
-  initShadowDOM();
+  if (!initShadowDOM()) {
+    console.log("[HT] Unsupported document for toolbar UI:", window.location.href);
+    return;
+  }
 
   document.addEventListener("mouseup", onMouseUp, true);
   document.addEventListener("pointerup", onMouseUp, true);  // touch / stylus support

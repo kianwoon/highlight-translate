@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Highlight Translate — Content Script Styles
+   UniLingo - Content Script Styles
    All classes prefixed with "ht-" to avoid collisions with host page.
    ========================================================================== */
 
@@ -129,6 +129,23 @@
 
 .ht-summary-icon:active {
   transform: scale(0.92);
+}
+
+.ht-translate-icon,
+.ht-humanize-icon,
+.ht-reply-icon,
+.ht-summary-icon {
+  background-color: #1a73e8;
+  border-color: #1a73e8;
+  color: #ffffff;
+}
+
+.ht-translate-icon:hover,
+.ht-humanize-icon:hover,
+.ht-reply-icon:hover,
+.ht-summary-icon:hover {
+  border-color: #1558b0;
+  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.35);
 }
 
 /* ---- Translation popup card ---- */
