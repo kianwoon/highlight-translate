@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Highlight Translate — Content Script Styles
+   UniLingo - Content Script Styles
    All classes prefixed with "ht-" to avoid collisions with host page.
    ========================================================================== */
 
@@ -131,15 +131,32 @@
   transform: scale(0.92);
 }
 
+.ht-translate-icon,
+.ht-humanize-icon,
+.ht-reply-icon,
+.ht-summary-icon {
+  background-color: #1a73e8;
+  border-color: #1a73e8;
+  color: #ffffff;
+}
+
+.ht-translate-icon:hover,
+.ht-humanize-icon:hover,
+.ht-reply-icon:hover,
+.ht-summary-icon:hover {
+  border-color: #1558b0;
+  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.35);
+}
+
 /* ---- Translation popup card ---- */
 
 .ht-translate-popup {
   position: fixed;
+  box-sizing: border-box;
   width: auto;
   min-width: 200px;
   max-width: calc(100vw - 16px);
-  max-height: 70vh;
-  overflow: auto;
+  overflow: visible;
   padding: 30px 16px 12px 16px;
   background: #ffffff;
   border-radius: 8px;
@@ -186,12 +203,21 @@
   background-color: #f1f3f4;
 }
 
-/* ---- Copy button ---- */
+/* ---- Action button row (Copy / Replace) ---- */
+/* Flex row with a gap so buttons never overlap, regardless of label width
+   (e.g. "Copy" growing to "Copied!", "Replace" shrinking to "..."/"Failed"). */
 
-.ht-copy-btn {
+.ht-actions {
   position: absolute;
   top: 6px;
   left: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- Copy button ---- */
+
+.ht-copy-btn {
   background: none;
   border: 1px solid #d0d0d0;
   font-size: 12px;
@@ -200,6 +226,7 @@
   cursor: pointer;
   padding: 2px 8px;
   border-radius: 4px;
+  white-space: nowrap;
 }
 
 .ht-copy-btn:hover {
@@ -211,9 +238,6 @@
 /* ---- Replace button ---- */
 
 .ht-replace-btn {
-  position: absolute;
-  top: 6px;
-  left: 55px;
   background: none;
   border: 1px solid #d0d0d0;
   font-size: 12px;
@@ -222,6 +246,7 @@
   cursor: pointer;
   padding: 2px 8px;
   border-radius: 4px;
+  white-space: nowrap;
 }
 
 .ht-replace-btn:hover {
