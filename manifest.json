@@ -1,18 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "Highlight Translate",
-  "version": "1.1.0",
-  "description": "Highlight text to translate or improve with AI",
+  "name": "UniLingo",
+  "version": "2.1",
+  "description": "Highlight text to translate, improve, reply, summarize, or explain with your choice of AI provider",
   "permissions": [
-    "activeTab",
-    "scripting",
     "storage"
   ],
   "host_permissions": [
     "https://translate.googleapis.com/*",
     "https://generativelanguage.googleapis.com/*",
     "https://api.openai.com/*",
-    "https://api.anthropic.com/*"
+    "https://api.anthropic.com/*",
+    "https://openrouter.ai/*",
+    "http://localhost:11434/*"
   ],
   "optional_host_permissions": [
     "https://*/*"
@@ -24,7 +24,6 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "css": ["content.css"],
       "run_at": "document_idle",
       "all_frames": true
     }
@@ -45,9 +44,12 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["content-main.js"],
+      "resources": ["content-main.js", "content.css"],
       "matches": ["<all_urls>"]
     }
   ],
-  "options_page": "options.html"
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
 }

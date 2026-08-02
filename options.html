@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Highlight Translate Settings</title>
+  <title>UniLingo Settings</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -65,10 +65,47 @@
     .status.error { color: #c5221f; }
     .hidden { display: none !important; }
     .section + .section { margin-top: 20px; }
+    .setup-guide {
+      background: #f8f9fa;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 8px;
+    }
+    .setup-guide h3 { font-size: 14px; margin-bottom: 10px; color: #1a73e8; }
+    .setup-guide ol { padding-left: 20px; font-size: 13px; line-height: 1.8; }
+    .setup-guide code {
+      background: #e8eaed;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: Menlo, monospace;
+    }
+    .setup-guide .cmd {
+      background: #202124;
+      color: #e0e0e0;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-family: Menlo, monospace;
+      font-size: 12px;
+      margin: 8px 0;
+      user-select: all;
+      cursor: pointer;
+    }
+    .setup-guide .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .setup-guide .status-dot.green { background: #34a853; }
+    .setup-guide .status-dot.red { background: #ea4335; }
+    .setup-guide .status-dot.yellow { background: #fbbc04; }
   </style>
 </head>
 <body>
-  <h1>Highlight Translate Settings</h1>
+  <h1>UniLingo Settings</h1>
 
   <div class="section">
     <label for="provider">AI Provider</label>
@@ -76,8 +113,30 @@
       <option value="gemini">Google Gemini</option>
       <option value="openai">OpenAI</option>
       <option value="anthropic">Anthropic</option>
+      <option value="openrouter">OpenRouter</option>
+      <option value="ollama">Ollama (Local)</option>
+      <option value="codingplan">AI Coding Plan</option>
       <option value="custom">Custom (OpenAI-compatible)</option>
     </select>
+  </div>
+
+  <div class="section hidden" id="ollamaSetupGuide">
+    <div class="setup-guide">
+      <h3>Ollama Setup</h3>
+      <div id="ollamaStatus">
+        <span class="status-dot yellow"></span>Checking connection...
+      </div>
+      <div id="ollamaInstructions" class="hidden" style="margin-top:12px">
+        <ol>
+          <li>Install Ollama from <a href="https://ollama.com/download" target="_blank">ollama.com/download</a></li>
+          <li>Open Terminal and run a model: <code>ollama run qwen3:1.7b</code></li>
+          <li>Allow extension access — run this command and restart Ollama:
+            <div class="cmd" onclick="navigator.clipboard.writeText(this.textContent)">launchctl setenv OLLAMA_ORIGINS "*"</div>
+            <span style="font-size:12px;color:#5f6368">Click to copy. Then quit &amp; reopen the Ollama app.</span>
+          </li>
+        </ol>
+      </div>
+    </div>
   </div>
 
   <div class="section">
@@ -95,12 +154,13 @@
   <div class="section">
     <label for="model">Model <span style="font-weight:400;color:#5f6368">(optional)</span></label>
     <input type="text" id="model" placeholder="Leave empty to use default">
+    <select id="modelSelect" class="hidden" style="width:100%;padding:8px 12px;border:1px solid #d0d0d0;border-radius:6px;font-size:14px;margin-top:0"></select>
   </div>
 
   <div class="section hidden" id="customEndpointSection">
-    <label for="customEndpoint">Custom Endpoint</label>
+    <label for="customEndpoint">Endpoint URL</label>
     <input type="text" id="customEndpoint" placeholder="e.g. https://api.groq.com/openai">
-    <p class="help">Base URL without /v1/chat/completions. Works with Groq, Together, Ollama, etc.</p>
+    <p class="help" id="endpointHelp">Base URL without /v1/chat/completions. Works with Groq, Together, Ollama, etc.</p>
   </div>
 
   <div class="section">
