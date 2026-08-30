@@ -5,6 +5,54 @@
 
 (function () {
   "use strict";
+
+  // ---------------------------------------------------------------------------
+  // Security / anti-bot guard
+  //
+  // Do NOT run on security-critical pages or frames. Cloudflare's Turnstile
+  // challenge (and other anti-bot verifiers) treat extensions that observe
+  // their DOM, re-attach listeners into dynamically created iframes, or poll
+  // window.getSelection() as automation signals, which makes the challenge
+  // fail with "Human Verify Check Failed". We must stay completely invisible
+  // on these pages/frames.
+  // ---------------------------------------------------------------------------
+
+  function isSecurityPage() {
+    try {
+      var href = window.location.href || "";
+      var host = window.location.hostname || "";
+      if (
+        /^https?:\/\/([^\/]*\.)?challenges\.cloudflare\.com/i.test(href) ||
+        /cdn-cgi\/challenge/i.test(href) ||
+        /\/challenge-platform\//i.test(href) ||
+        /\/_\/hc\//i.test(href) ||
+        /turnstile/i.test(host) ||
+        host === "challenges.cloudflare.com"
+      ) {
+        return true;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  function isSubframe() {
+    try {
+      return window.self !== window.top;
+    } catch (e) {
+      // Cross-origin access to window.top is blocked — we are in a subframe.
+      return true;
+    }
+  }
+
+  // Never run inside Cloudflare challenge frames, and only run in the top
+  // frame. Subframes (ad iframes, embedded widgets, login iframes, payment
+  // frames, etc.) are where anti-bot verifiers live and are where our
+  // event interception / selection polling is most likely to be flagged.
+  if (isSecurityPage() || isSubframe()) {
+    console.log("[HT] Skipping injection in", window.location.href, "(security page or subframe)");
+    return;
+  }
+
   console.log("[HT] LOADED frame:", window.location.href, "body:", !!document.body);
 
   // ---------------------------------------------------------------------------
@@ -35,6 +83,7 @@
   let savedText = ""; // Selected text saved when icon appears (prevents race on click)
   let savedRange = null; // Cloned Range for text replacement
   let savedEditableEl = null; // contenteditable ancestor for re-querying stale ranges
+  let refocusEditableEl = null; // element to refocus after the popup closes (post-replace)
   let iconLabelRequestId = 0;
   let selectedLanguageText = "";
   let selectedLanguageCode = "";
@@ -157,8 +206,31 @@
       function onResult(e) {
         document.removeEventListener("__ht_replace_result", onResult);
         var success = e.detail && e.detail.success;
-        console.log("[HT] Replace: main-world result:", success);
+        var editableId = e.detail && e.detail.editableId;
+        console.log("[HT] Replace: main-world result:", success, "editableId:", editableId);
         if (success) {
+          // NOTE: do NOT clear savedEditableEl before using it below — it is
+          // the only handle we have to refocus contenteditable editors (like
+          // x.com), whose internal caret/focus is not restored by the
+          // replacement itself. Capture what we need, then clear state.
+          var focusEl = null;
+          if (editableId) {
+            focusEl = document.querySelector('[data-ht-editable="' + editableId + '"]');
+          } else if (savedEditableEl) {
+            focusEl = savedEditableEl;
+          }
+          // Remember it so closePopup() (which runs right after and removes
+          // the popup, stealing focus) can restore it.
+          refocusEditableEl = focusEl || null;
+          if (focusEl) {
+            try { focusEl.focus(); } catch (err) { /* ignore */ }
+            if (typeof focusEl.selectionStart === "number" && typeof focusEl.setSelectionRange === "function") {
+              try {
+                var caret = focusEl.selectionStart || 0;
+                focusEl.setSelectionRange(caret, caret);
+              } catch (err) { /* ignore */ }
+            }
+          }
           savedRange = null;
           savedEditableEl = null;
         }
@@ -366,14 +438,8 @@
 
       replaceBtn.textContent = "...";
       replaceSelectedText(resultEl.textContent).then(function (success) {
-        if (success) {
-          closePopup();
-        } else {
-          replaceBtn.textContent = "Failed";
-          setTimeout(function () {
-            replaceBtn.textContent = "Replace";
-          }, 1500);
-        }
+        // Dismiss the popup after replacing, like the Copy button does.
+        closePopup();
       });
     });
 
@@ -564,26 +630,63 @@
     const { top, left } = getSelectionPosition();
     const GAP = 36;
     const ICON_H = 28; // icon height in px
+    const MARGIN = 4; // keep icons at least this far from viewport edges
+    const STACK_HEIGHT = ICON_H + GAP * 3; // total height of the 4-icon stack
 
-    // Icons go upward from selection bottom — last icon top edge at selection line.
-    const base = top - ICON_H;
+    // Icons go upward from selection bottom — 4th icon top edge at the cursor.
+    // If the whole stack does NOT fit above the cursor (e.g. text highlighted
+    // at the very top of the page), flip it BELOW the cursor so the 1st icon
+    // starts below the mouse cursor instead of running off-screen.
+    const fitsAbove = top - STACK_HEIGHT >= MARGIN;
 
-    icon.style.top = (base - GAP * 3) + "px";
+    let iconTop, humanizeTop, replyTop, summaryTop;
+    if (fitsAbove) {
+      const base = top - ICON_H;
+      iconTop = base - GAP * 3;
+      humanizeTop = base - GAP * 2;
+      replyTop = base - GAP;
+      summaryTop = base;
+    } else {
+      iconTop = top + 6; // 1st icon starts just below the mouse cursor
+      humanizeTop = top + 6 + GAP;
+      replyTop = top + 6 + GAP * 2;
+      summaryTop = top + 6 + GAP * 3;
+    }
+
+    // Keep the whole group on-screen vertically (safety net for short viewports).
+    const vh = window.innerHeight;
+    const groupBottom = summaryTop + ICON_H;
+    if (groupBottom > vh - MARGIN) {
+      const shift = vh - MARGIN - groupBottom;
+      iconTop += shift;
+      humanizeTop += shift;
+      replyTop += shift;
+      summaryTop += shift;
+    }
+    if (iconTop < MARGIN) {
+      const shift = MARGIN - iconTop;
+      iconTop += shift;
+      humanizeTop += shift;
+      replyTop += shift;
+      summaryTop += shift;
+    }
+
+    icon.style.top = iconTop + "px";
     icon.style.left = left + "px";
     icon.style.display = "block";
 
     const humanizeIcon = createHumanizeIcon();
-    humanizeIcon.style.top = (base - GAP * 2) + "px";
+    humanizeIcon.style.top = humanizeTop + "px";
     humanizeIcon.style.left = left + "px";
     humanizeIcon.style.display = "block";
 
     const replyIcon = createReplyIcon();
-    replyIcon.style.top = (base - GAP) + "px";
+    replyIcon.style.top = replyTop + "px";
     replyIcon.style.left = left + "px";
     replyIcon.style.display = "block";
 
     const summaryIcon = createSummaryIcon();
-    summaryIcon.style.top = base + "px";
+    summaryIcon.style.top = summaryTop + "px";
     summaryIcon.style.left = left + "px";
     summaryIcon.style.display = "block";
 
@@ -723,6 +826,17 @@
     clearDismissTimer();
     isTranslating = false;
     savedRange = null;
+    // Removing the popup (and its focused Replace button) from the shadow DOM
+    // resets focus to <body>. If we just replaced text in an editable element
+    // (form field or contenteditable like x.com's editor), restore focus so
+    // the user can keep editing (typing / Del) immediately.
+    try {
+      if (refocusEditableEl && refocusEditableEl !== document.activeElement &&
+          typeof refocusEditableEl.focus === "function") {
+        refocusEditableEl.focus();
+      }
+    } catch (e) { /* ignore */ }
+    refocusEditableEl = null;
   }
 
   function resetDismissTimer() {
@@ -1027,34 +1141,6 @@
     // Clear debounce on pointerdown (touch / stylus) start of a new selection.
     clearTimeout(debounceTimer);
   }, true);
-
-  // Watch for dynamically added iframes and ensure content scripts run.
-  var observer = new MutationObserver(function (mutations) {
-    for (var i = 0; i < mutations.length; i++) {
-      for (var j = 0; j < mutations[i].addedNodes.length; j++) {
-        var node = mutations[i].addedNodes[j];
-        if (node.nodeName === "IFRAME" || (node.querySelector && node.querySelector("iframe"))) {
-          // The content script should auto-inject via all_frames:true,
-          // but some dynamically loaded iframes may need a nudge.
-          // We'll re-attach our document listeners just in case.
-          try {
-            var doc = node.contentDocument || (node.nodeName === "IFRAME" ? null : null);
-            if (doc) {
-              doc.addEventListener("mouseup", onMouseUp, true);
-              doc.addEventListener("click", onDocumentClick, true);
-              doc.addEventListener("keydown", onKeyDown, true);
-            }
-          } catch (e) {
-            // Cross-origin iframe — cannot access, all_frames should handle it.
-          }
-        }
-      }
-    }
-  });
-  observer.observe(document.documentElement || document.body, {
-    childList: true,
-    subtree: true
-  });
 
   console.log("[HT] INIT COMPLETE in", window.location.hostname);
 
