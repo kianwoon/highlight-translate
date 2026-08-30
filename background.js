@@ -298,9 +298,9 @@ async function handleImprove(text, languageCode) {
   }
 
   const resolvedModel = model || PROVIDER_DEFAULTS[provider].model;
-  const effectivePrompt = customPrompt || buildImproveDefaultPrompt(languageCode);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+   const effectivePrompt = customPrompt || buildImproveDefaultPrompt(languageCode);
+   const controller = new AbortController();
+   const timeoutId = setTimeout(() => controller.abort(), 90000);
 
   try {
     let result;
@@ -357,7 +357,7 @@ async function handleReply(text, languageCode) {
   const resolvedModel = model || PROVIDER_DEFAULTS[provider].model;
   const effectivePrompt = replyPrompt || buildReplyDefaultPrompt(languageCode);
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
 
   try {
     let result;
@@ -413,7 +413,7 @@ async function handleSummarize(text, languageCode) {
   const resolvedModel = model || PROVIDER_DEFAULTS[provider].model;
   const effectivePrompt = summaryPrompt || buildSummarizeDefaultPrompt(languageCode);
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
 
   try {
     let result;
