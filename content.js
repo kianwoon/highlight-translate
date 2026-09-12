@@ -166,6 +166,7 @@
   // sets display:none (which zeroes getBoundingClientRect on the anchor icon).
   // positionPopup() prefers this so the popup anchors to the cursor, not (8,8).
   let lastAnchorRect = null; // {left,top,right,bottom,width,height} | null
+  let lastPopupCursor = null; // {x,y} cursor coords captured at the triggering icon press
   let lastMouseTime = 0; // Date.now() of last mouse move/up (freshness check)
   let savedText = ""; // Selected text saved when icon appears (prevents race on click)
   let savedRange = null; // Cloned Range for text replacement
@@ -322,6 +323,13 @@
     // positionPopup() would clamp to (8,8). lastAnchorRect keeps the popup
     // anchored to the cursor/toolbar position.
     captureToolbarRect();
+    // Record the cursor at the moment of the press so the popup can anchor to
+    // it even if lastMousePos is stale (pointerdown/click both carry coords;
+    // some synthetic events omit them → only overwrite when present).
+    if (typeof e.clientX === "number" && typeof e.clientY === "number" &&
+        (e.clientX !== 0 || e.clientY !== 0)) {
+      lastPopupCursor = { x: e.clientX, y: e.clientY };
+    }
     // Hide the 5-icon toolbar immediately, before handler(e), so no poll or
     // selectionchange can re-show it mid-request. hideToolbar() only toggles
     // visibility (display/:popover-open) — it does NOT touch savedText or
@@ -407,6 +415,7 @@
       if (el.getAttribute("popover") !== "manual") el.setAttribute("popover", "manual");
       if (!el.isConnected) return false; // showing a detached node throws
       if (!el.matches(":popover-open")) el.showPopover(); // no-op-safe if already shown
+      el.style.zIndex = "2147483647"; // inline beats any host stylesheet injected later
       return true;
     } catch (e) {
       // Some pages break popover (e.g. InvalidStateError on detached nodes); fall back silently.
@@ -694,6 +703,7 @@
 
     popupEl = document.createElement("div");
     popupEl.className = "ht-translate-popup";
+    popupEl.setAttribute("popover", "manual"); // required so showPopover() can promote it
 
     const copyBtn = document.createElement("button");
     copyBtn.className = "ht-copy-btn";
@@ -1107,9 +1117,9 @@
     if (!anchorEl) return;
 
     // Anchor: prefer the cached visible-toolbar rect (captured before hiding);
-    // else the live anchor (may be zero-size if display:none); else the last
-    // mouse position; else a fixed (120,120). Never let a zero rect clamp the
-    // popup to the top-left corner.
+    // else the live anchor (may be zero-size if display:none); else the cursor
+    // captured at the triggering press; else the last mouse position; else a
+    // fixed (120,120). Never let a zero rect clamp the popup to the corner.
     let anchorRect = null;
     if (lastAnchorRect && lastAnchorRect.width > 0 && lastAnchorRect.height > 0) {
       anchorRect = lastAnchorRect;
@@ -1118,9 +1128,11 @@
       if (live && live.width > 0 && live.height > 0) {
         anchorRect = live;
       } else {
-        const mx = lastMousePos ? lastMousePos.clientX : 120;
-        const my = lastMousePos ? lastMousePos.clientY : 120;
-        anchorRect = { left: mx, top: my, right: mx + 40, bottom: my + 40, width: 40, height: 40 };
+        // Place the popup's TOP-LEFT at the cursor: left=rect.left and
+        // top=rect.bottom+gap both resolve to the cursor point below.
+        const cx = lastPopupCursor ? lastPopupCursor.x : (lastMousePos ? lastMousePos.clientX : 120);
+        const cy = lastPopupCursor ? lastPopupCursor.y : (lastMousePos ? lastMousePos.clientY : 120);
+        anchorRect = { left: cx, top: cy, right: cx + 40, bottom: cy + 40, width: 40, height: 40 };
       }
     }
     const vh = window.innerHeight;
