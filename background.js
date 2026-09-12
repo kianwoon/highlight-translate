@@ -4,7 +4,7 @@
  * Handles improve requests by calling the selected AI provider API.
  */
 
-const TRANSLATE_ENDPOINT = "https://translate.googleapis.com/translate_a/single";
+const TRANSLATE_ENDPOINT = "https://clients5.google.com/translate_a/t";
 const DEFAULT_TRANSLATION_TARGET = "zh-CN";
 const CHINESE_TRANSLATION_TARGET = "en";
 
@@ -83,7 +83,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error("[UniLingo] Translation failed:", error);
         sendResponse({
           success: false,
-          translatedText: "Translation failed. Please try again.",
+          translatedText:
+            error && error.name === "AbortError"
+              ? "Request timed out. Please try again."
+              : "Translation failed. Please try again.",
         });
       });
     return true;
@@ -175,6 +178,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   }
+
+  if (message.action === "social" && message.text) {
+    handleSocial(message.text, message.languageCode)
+      .then((translatedText) => {
+        sendResponse({ success: true, translatedText });
+      })
+      .catch((error) => {
+        console.error("[UniLingo] Social failed:", error, error.details || "");
+        if (error.message === "NO_API_KEY") {
+          sendResponse({
+            success: false,
+            error: "NO_API_KEY",
+            translatedText: "Set up your AI provider",
+          });
+        } else if (error.message === "API_ERROR") {
+          sendResponse({
+            success: false,
+            error: "API_ERROR",
+            translatedText: error.details || "API error occurred.",
+          });
+        } else {
+          sendResponse({
+            success: false,
+            translatedText: "Failed to rewrite hook: " + error.message,
+          });
+        }
+      });
+    return true;
+  }
 });
 
 function getBaseLanguage(languageCode) {
@@ -187,7 +219,7 @@ function getBaseLanguage(languageCode) {
 }
 
 function getDetectedLanguage(data) {
-  return Array.isArray(data) && typeof data[2] === "string" ? data[2] : "";
+  return extractTranslationParts(data).detectedLanguage;
 }
 
 function getTranslationTargetForDetectedLanguage(detectedLanguage) {
@@ -242,35 +274,62 @@ function buildSummarizeDefaultPrompt(languageCode) {
   ].join(" ");
 }
 
+function buildSocialDefaultPrompt(languageCode) {
+  return [
+    "Rewrite the selected text as a strong social-media hook.",
+    "Open with a scroll-stopping first line (curiosity gap, bold claim, or relatable pain point).",
+    "Keep it punchy, conversational, and human — short lines, simple words.",
+    "Preserve the original meaning and key point.",
+    buildLanguageInstruction(languageCode),
+    "Return ONLY the hook text, nothing else.",
+  ].join(" ");
+}
+
 function buildTranslationUrl(text, targetLanguage) {
   const params = new URLSearchParams({
-    client: "gtx",
+    client: "dict-chrome-ex",
     sl: "auto",
     tl: targetLanguage,
-    dt: "t",
     q: text,
   });
   return `${TRANSLATE_ENDPOINT}?${params.toString()}`;
 }
 
-function extractTranslatedText(data) {
-  if (!data || !Array.isArray(data[0])) {
+// dict-chrome-ex returns e.g. [["你好世界。你好吗？","en"]] or [["Hello World","zh-CN"]].
+// Be tolerant of nested-array shapes too.
+function extractTranslationParts(data) {
+  let node = data;
+  while (Array.isArray(node) && Array.isArray(node[0])) {
+    node = node[0];
+  }
+  const translatedText = Array.isArray(node) && typeof node[0] === "string" ? node[0].trim() : "";
+  const detectedLanguage = Array.isArray(node) && typeof node[1] === "string" ? node[1] : "";
+  if (!translatedText) {
     throw new Error("Unexpected API response format");
   }
-  const translated = data[0]
-    .map((chunk) => (chunk && chunk[0] ? chunk[0] : ""))
-    .join("")
-    .trim();
-  if (!translated) {
-    throw new Error("Empty translation result");
-  }
-  return translated;
+  return { translatedText, detectedLanguage };
+}
+
+function extractTranslatedText(data) {
+  return extractTranslationParts(data).translatedText;
 }
 
 async function fetchTranslation(text, targetLanguage) {
   const url = buildTranslationUrl(text, targetLanguage);
-  const response = await fetch(url);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
+  let response;
+  try {
+    response = await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!response.ok) {
+    if (response.status === 429 || response.status === 403) {
+      throw new Error(
+        `Google Translate blocked the request (HTTP ${response.status}). Try again in a moment.`
+      );
+    }
     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   }
   return response.json();
@@ -278,11 +337,11 @@ async function fetchTranslation(text, targetLanguage) {
 
 async function handleTranslation(text) {
   const initialData = await fetchTranslation(text, DEFAULT_TRANSLATION_TARGET);
-  const detectedLanguage = getDetectedLanguage(initialData);
+  const { translatedText, detectedLanguage } = extractTranslationParts(initialData);
   const targetLanguage = getTranslationTargetForDetectedLanguage(detectedLanguage);
 
   if (targetLanguage === DEFAULT_TRANSLATION_TARGET) {
-    return extractTranslatedText(initialData);
+    return translatedText;
   }
 
   const translatedData = await fetchTranslation(text, targetLanguage);
@@ -440,6 +499,62 @@ async function handleSummarize(text, languageCode) {
       case "custom":
         if (!customEndpoint) throw new Error("Custom endpoint not configured");
         result = await callCustomSummarize(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
+        break;
+      default:
+        throw new Error("Unknown provider: " + provider);
+    }
+    clearTimeout(timeoutId);
+    return result;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === "AbortError") {
+      throw makeApiError("Request timed out (30s). Check your connection.");
+    }
+    if (error.name === "TypeError") {
+      throw makeApiError("Network error. Check your connection.");
+    }
+    throw error;
+  }
+}
+
+async function handleSocial(text, languageCode) {
+  const { provider, apiKey, model, customEndpoint, socialPrompt } =
+    await chrome.storage.local.get(["provider", "apiKey", "model", "customEndpoint", "socialPrompt"]);
+
+  if (!provider || (!apiKey && provider !== "ollama")) {
+    throw new Error("NO_API_KEY");
+  }
+
+  const resolvedModel = model || PROVIDER_DEFAULTS[provider].model;
+  const effectivePrompt = socialPrompt || buildSocialDefaultPrompt(languageCode);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
+
+  try {
+    let result;
+    switch (provider) {
+      case "gemini":
+        result = await callGeminiSocial(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
+        break;
+      case "openai":
+        result = await callOpenAISocial(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
+        break;
+      case "anthropic":
+        result = await callAnthropicSocial(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
+        break;
+      case "openrouter":
+        result = await callOpenRouterSocial(apiKey, resolvedModel, text, effectivePrompt, controller.signal);
+        break;
+      case "ollama":
+        result = await callOllamaSocial(resolvedModel, text, effectivePrompt, controller.signal);
+        break;
+      case "codingplan":
+        if (!customEndpoint) throw new Error("Coding Plan endpoint not configured");
+        result = await callCodingPlanSocial(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
+        break;
+      case "custom":
+        if (!customEndpoint) throw new Error("Custom endpoint not configured");
+        result = await callCustomSocial(apiKey, customEndpoint, resolvedModel, text, effectivePrompt, controller.signal);
         break;
       default:
         throw new Error("Unknown provider: " + provider);
@@ -725,6 +840,14 @@ async function callCodingPlanSummarize(apiKey, endpoint, model, text, summaryPro
   ], signal, 1024);
 }
 
+async function callCodingPlanSocial(apiKey, endpoint, model, text, socialPrompt, signal) {
+  const systemPrompt = socialPrompt || "Rewrite the following text as a strong social-media hook. Open with a scroll-stopping first line and keep it punchy, conversational, and human. Preserve the original meaning. Return ONLY the hook text, nothing else.";
+  return callCodingPlanBase(apiKey, endpoint, model, [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: text },
+  ], signal, 1024);
+}
+
 // --- Custom (OpenAI-compatible) provider ---
 
 async function callCustom(apiKey, customEndpoint, model, text, customPrompt, signal) {
@@ -766,6 +889,8 @@ async function callCustom(apiKey, customEndpoint, model, text, customPrompt, sig
 const REPLY_DEFAULT_PROMPT = "Write a professional, concise reply to the following message. Match the tone and context. Return ONLY the reply text, nothing else.";
 
 const SUMMARIZE_DEFAULT_PROMPT = "Summarize the following text as a TL;DR with concise bullet points. Return ONLY the bullet points, each starting with \"\u2022\".";
+
+const SOCIAL_DEFAULT_PROMPT = "Rewrite the following text as a strong social-media hook. Open with a scroll-stopping first line and keep it punchy, conversational, and human. Preserve the original meaning. Return ONLY the hook text, nothing else.";
 
 async function callGeminiReply(apiKey, model, text, replyPrompt, signal) {
   const systemPrompt = replyPrompt || REPLY_DEFAULT_PROMPT;
@@ -1094,6 +1219,185 @@ async function callCustomSummarize(apiKey, customEndpoint, model, text, summaryP
   if (!model) throw new Error("Model required for custom provider");
 
   const systemPrompt = summaryPrompt || SUMMARIZE_DEFAULT_PROMPT;
+
+  const response = await fetch(`${customEndpoint}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: text },
+      ],
+      temperature: 0.7,
+      max_tokens: 1024,
+    }),
+    signal,
+  });
+
+  if (response.status === 401) throw makeApiError("Invalid API key. Check your custom endpoint API key.");
+  if (response.status === 429) throw makeApiError("Rate limited. Try again later.");
+  if (!response.ok) throw makeApiError(`HTTP ${response.status}: ${response.statusText}`);
+
+  const data = await response.json();
+  if (!data?.choices?.[0]?.message?.content) {
+    throw new Error("Unexpected API response format");
+  }
+
+  return data.choices[0].message.content;
+}
+
+async function callGeminiSocial(apiKey, model, text, socialPrompt, signal) {
+  const systemPrompt = socialPrompt || SOCIAL_DEFAULT_PROMPT;
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+      }),
+      signal,
+    }
+  );
+
+  if (response.status === 401) throw makeApiError("Invalid API key. Check your Gemini API key.");
+  if (response.status === 429) throw makeApiError("Rate limited. Try again later.");
+  if (!response.ok) throw makeApiError(`HTTP ${response.status}: ${response.statusText}`);
+
+  const data = await response.json();
+
+  if (!data?.candidates?.[0]?.content) {
+    throw makeApiError("Response blocked by safety filter.");
+  }
+  if (!data.candidates[0].content?.parts?.[0]) {
+    throw new Error("Unexpected API response format");
+  }
+
+  return data.candidates[0].content.parts[0].text;
+}
+
+async function callOpenAISocial(apiKey, model, text, socialPrompt, signal) {
+  const systemPrompt = socialPrompt || SOCIAL_DEFAULT_PROMPT;
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: text },
+      ],
+      temperature: 0.7,
+      max_tokens: 1024,
+    }),
+    signal,
+  });
+
+  if (response.status === 401) throw makeApiError("Invalid API key. Check your OpenAI API key.");
+  if (response.status === 429) throw makeApiError("Rate limited or quota exceeded. Try again later.");
+  if (!response.ok) throw makeApiError(`HTTP ${response.status}: ${response.statusText}`);
+
+  const data = await response.json();
+  if (!data?.choices?.[0]?.message?.content) {
+    throw new Error("Unexpected API response format");
+  }
+
+  return data.choices[0].message.content;
+}
+
+async function callAnthropicSocial(apiKey, model, text, socialPrompt, signal) {
+  const systemPrompt = socialPrompt || SOCIAL_DEFAULT_PROMPT;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      system: systemPrompt,
+      messages: [{ role: "user", content: text }],
+      temperature: 0.7,
+      max_tokens: 1024,
+    }),
+    signal,
+  });
+
+  if (response.status === 401) throw makeApiError("Invalid API key. Check your Anthropic API key.");
+  if (response.status === 429) throw makeApiError("Rate limited. Try again later.");
+  if (!response.ok) throw makeApiError(`HTTP ${response.status}: ${response.statusText}`);
+
+  const data = await response.json();
+  if (!data?.content?.[0]?.text) {
+    throw new Error("Unexpected API response format");
+  }
+
+  return data.content[0].text;
+}
+
+async function callOpenRouterSocial(apiKey, model, text, socialPrompt, signal) {
+  const systemPrompt = socialPrompt || SOCIAL_DEFAULT_PROMPT;
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: text },
+      ],
+      temperature: 0.7,
+      max_tokens: 1024,
+    }),
+    signal,
+  });
+
+  if (response.status === 401) throw makeApiError("Invalid API key. Check your OpenRouter API key.");
+  if (response.status === 429) throw makeApiError("Rate limited or insufficient credits. Try again later.");
+  if (!response.ok) throw makeApiError(`HTTP ${response.status}: ${response.statusText}`);
+
+  const data = await response.json();
+  if (!data?.choices?.[0]?.message?.content) {
+    throw new Error("Unexpected API response format");
+  }
+
+  return data.choices[0].message.content;
+}
+
+async function callOllamaSocial(model, text, socialPrompt, signal) {
+  const systemPrompt = socialPrompt || SOCIAL_DEFAULT_PROMPT;
+
+  return ollamaFetch({
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: text },
+    ],
+    stream: false,
+  });
+}
+
+async function callCustomSocial(apiKey, customEndpoint, model, text, socialPrompt, signal) {
+  if (!model) throw new Error("Model required for custom provider");
+
+  const systemPrompt = socialPrompt || SOCIAL_DEFAULT_PROMPT;
 
   const response = await fetch(`${customEndpoint}/v1/chat/completions`, {
     method: "POST",

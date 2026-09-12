@@ -6,6 +6,35 @@
 (function () {
   "use strict";
 
+  // If the extension was reloaded/updated while this page stayed open, the old
+  // content script's runtime context is invalidated and chrome.runtime.getURL()
+  // returns "chrome-extension://invalid/". Bail out immediately so we never
+  // issue failed fetches or inject dead script tags.
+  try {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+      // Isolated-world runtime is dead. This is a SAME-world check only — the
+      // MAIN world has its own window object and cannot observe this flag.
+      console.log("[HT] extension context invalid, aborting");
+      return;
+    }
+  } catch (e) {
+    return;
+  }
+
+  // Returns a safe extension URL, or "#" when the runtime context is invalid
+  // (chrome.runtime.getURL() then yields "chrome-extension://invalid/" which
+  // pollutes the console with failed GETs). Never call getURL directly.
+  function htExtUrl(path) {
+    try {
+      if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) return "#";
+      var u = chrome.runtime.getURL(path);
+      if (!u || u.indexOf("invalid") !== -1) return "#";
+      return u;
+    } catch (e) {
+      return "#";
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Security / anti-bot guard
   //
@@ -60,6 +89,7 @@
   // ---------------------------------------------------------------------------
 
   const DEBOUNCE_MS = 300;
+  const CLEAR_DEBOUNCE_MS = 800;
   const DISMISS_TIMEOUT_MS = 5000;
   const MAX_SOURCE_LENGTH = 500; // characters to show in the source preview
   const POLL_INTERVAL_MS = 500;
@@ -74,12 +104,69 @@
   let humanizeIconEl = null;
   let replyIconEl = null;
   let summaryIconEl = null;
+  let socialIconEl = null;
+  let toolbarEl = null; // single popover container for all 5 icons
+  let toolbarVisible = false;
+  let lastUiRoot = null; // last root the toolbar was ensured into (modal host tracking)
   let popupEl = null;
   let dismissTimer = null;
   let debounceTimer = null;
   let isTranslating = false;
   let injectedSel = null; // selection data relayed from main-world script
-  let lastMousePos = null; // Tracks mouse position for icon placement
+  let lastInjectedSelTime = 0; // Date.now() of last __ht_sel with text (freshness check)
+  let clearInjectedSelTimer = null; // debounced __ht_sel_clear (survives composer re-render)
+
+  // Isolated-world getSelection() is unreliable inside LinkedIn's contenteditable
+  // (farbling / Draft.js); a fresh main-world injectedSel is the source of truth.
+  function hasFreshInjectedSel(ms) {
+    if (typeof ms !== "number") ms = 1500;
+    return !!(
+      injectedSel &&
+      injectedSel.text &&
+      Date.now() - lastInjectedSelTime < ms
+    );
+  }
+
+  // Native LIVE non-collapsed selection with real text. Isolated-world
+  // getSelection() may be unreliable inside editors, but a collapsed/empty
+  // result is trustworthy evidence that NO text is selected (the bug: caret
+  // inside a word must never surface the toolbar).
+  function hasLiveSelection() {
+    try {
+      var s = window.getSelection();
+      if (!s || s.rangeCount < 1 || s.isCollapsed) return false;
+      return s.toString().trim().length >= 2;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Form-field (<input>/<textarea>) selection lives in its own shadow tree,
+  // so it is invisible to getSelection() but still a real user selection.
+  function hasLiveFormFieldSelection() {
+    try {
+      var ae = document.activeElement;
+      if (!ae) return false;
+      if (ae.tagName === "TEXTAREA" ||
+          (ae.tagName === "INPUT" && ae.type !== "hidden" && ae.type !== "password")) {
+        return typeof ae.selectionStart === "number" && ae.selectionEnd > ae.selectionStart;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  // The single source of truth for "may a toolbar appear right now?". A stale
+  // main-world injectedSel alone is NEVER sufficient; it must be fresh AND
+  // corroborated by a live native or form-field selection.
+  function hasLiveSelectionSource() {
+    return hasLiveSelection() || hasLiveFormFieldSelection();
+  }
+  let lastMousePos = null; // Tracks mouse position for toolbar placement
+  // Authoritative on-screen rect of the toolbar, captured BEFORE hideToolbar()
+  // sets display:none (which zeroes getBoundingClientRect on the anchor icon).
+  // positionPopup() prefers this so the popup anchors to the cursor, not (8,8).
+  let lastAnchorRect = null; // {left,top,right,bottom,width,height} | null
+  let lastMouseTime = 0; // Date.now() of last mouse move/up (freshness check)
   let savedText = ""; // Selected text saved when icon appears (prevents race on click)
   let savedRange = null; // Cloned Range for text replacement
   let savedEditableEl = null; // contenteditable ancestor for re-querying stale ranges
@@ -87,6 +174,8 @@
   let iconLabelRequestId = 0;
   let selectedLanguageText = "";
   let selectedLanguageCode = "";
+  let lastToolbarPressTime = 0; // Guards dismissal when mouse events land on the toolbar
+  let lastHandledPressTime = 0; // Dedupe pointerdown vs click activation (one action per press)
 
   // ---------------------------------------------------------------------------
   // Shadow DOM initialization for CSS isolation
@@ -101,26 +190,96 @@
       return false;
     }
 
-    shadowHost = createHtmlElement("div");
-    shadowHost.id = "ht-shadow-host";
-    if (!shadowHost.style) {
-      shadowHost = null;
-      return false;
+    // LIGHT DOM: the toolbar/popup are promoted to the top layer via the
+    // Popover API. Chrome has hit-testing bugs with popover elements inside
+    // shadow roots (icons visible but clicks do nothing, e.g. inside the
+    // LinkedIn dialog). Light DOM + showPopover is reliable. Styles are
+    // injected via an adopted <link> in document.head; ht- class names avoid
+    // host-page CSS collisions.
+    shadowHost = null;
+    shadowRoot = null;
+
+    // Inline critical toolbar CSS via <style id="ht-content-styles"> instead of
+    // a <link> in <head>: injected ONCE with an id check, and textContent set
+    // asynchronously — no render-blocking network injection into <head> that
+    // could trigger host-page hydration mismatches (React error #418).
+    if (!document.getElementById("ht-content-styles")) {
+      var styleEl = createHtmlElement("style");
+      styleEl.id = "ht-content-styles";
+      document.head.appendChild(styleEl);
+      var cssUrl = "";
+      try { cssUrl = chrome.runtime.getURL("content.css"); } catch (e) {}
+      if (!cssUrl || cssUrl.indexOf("invalid") !== -1) {
+        console.log("[HT] skip CSS fetch, context invalid");
+      } else {
+        fetch(cssUrl)
+          .then(function (r) { return r.text(); })
+          .then(function (css) { styleEl.textContent = css; })
+          .catch(function (e) {
+            if (!initShadowDOM._cssErrLogged) {
+              initShadowDOM._cssErrLogged = true;
+              console.log("[HT] CSS fetch failed (falling back to UA styles):", e && e.message);
+            }
+          });
+      }
     }
-
-    // Reset all inherited CSS properties to prevent host page styles from leaking in
-    // (e.g., color: white from user-injected CSS), then override with our specific values
-    shadowHost.style.cssText = "all:initial; position:fixed; top:0; left:0; width:0; height:0; pointer-events:auto; z-index:2147483647;";
-    shadowRoot = shadowHost.attachShadow({ mode: "open" });
-
-    // Load content.css into shadow root via <link> (sync XHR blocked by MV3 permissions policy)
-    var linkEl = createHtmlElement("link");
-    linkEl.rel = "stylesheet";
-    linkEl.href = chrome.runtime.getURL("content.css");
-    shadowRoot.appendChild(linkEl);
-
-    document.body.appendChild(shadowHost);
     return true;
+  }
+
+  // Find the topmost open modal <dialog>. showModal() makes everything
+  // OUTSIDE the dialog inert for hit-testing — top-layer popovers anchored to
+  // body still paint above but do NOT receive pointer events. To stay
+  // clickable, our UI must live INSIDE the open dialog itself. Prefer a real
+  // `dialog[open]` (that is what applies inertness); otherwise a large visible
+  // role=dialog container; null when no modal is present.
+  function getModalHost() {
+    var ds = document.querySelectorAll("dialog[open],[role=dialog]");
+    for (var i = ds.length - 1; i >= 0; i--) {
+      var d = ds[i];
+      try {
+        if (d.open && d.matches("dialog")) return d;
+      } catch (e) {}
+    }
+    for (var j = ds.length - 1; j >= 0; j--) {
+      var d2 = ds[j];
+      var r = d2.getBoundingClientRect();
+      if (r.width > 200 && r.height > 200) return d2;
+    }
+    return null;
+  }
+
+  function getUiRoot() {
+    var host = getModalHost();
+    if (host) {
+      try {
+        if (!host.hasAttribute("data-ht-host")) host.setAttribute("data-ht-host", "1");
+      } catch (e) {}
+      return host;
+    }
+    return document.body || document.documentElement;
+  }
+
+  // Append the UI node into the resolved UI root exactly once. When the root
+  // is LinkedIn's React-managed dialog, appending our own (unknown-to-React)
+  // child is safe because React does not remove foreign children — but the
+  // append must never throw, so fall back to document.body on failure.
+  function ensureInRoot(el) {
+    var target = getUiRoot();
+    if (!el) return target;
+    if (el.parentNode === target) return target;
+    try {
+      demoteFromTopLayer(el); // promote later; never leave a stale shown popover on a moved node
+      target.appendChild(el);
+    } catch (e) {
+      try {
+        demoteFromTopLayer(el);
+        (document.body || document.documentElement).appendChild(el);
+        return document.body;
+      } catch (e2) {
+        /* leave wherever it is; never throw */
+      }
+    }
+    return el.parentNode || target;
   }
 
   // ---------------------------------------------------------------------------
@@ -128,7 +287,138 @@
   // ---------------------------------------------------------------------------
 
   function isInsideExtension(e) {
+    // Guard via closest() so clicks anywhere on the toolbar/popup (including
+    // child icons and text nodes) never trigger outside-dismiss logic.
+    var t = e.target;
+    if (t && typeof t.closest === "function" && t.closest("#ht-toolbar, #ht-popup")) return true;
+    if (toolbarEl && (toolbarEl === t || toolbarEl.contains(t))) return true;
+    if (popupEl && (popupEl === t || popupEl.contains(t))) return true;
+    // Legacy: keep composedPath check for any shadow remnants.
     return shadowHost != null && e.composedPath().indexOf(shadowHost) !== -1;
+  }
+
+  // Stamp the time of the most recent mouse interaction with the toolbar.
+  // A fresh press suppresses any dismissal (dismiss()/onDocumentClick) for a
+  // short window so pressing a button cannot hide the toolbar before its
+  // click handler runs — even if the host page clears the selection first.
+  function recordToolbarPress() {
+    lastToolbarPressTime = Date.now();
+  }
+
+  function isRecentToolbarPress() {
+    return Date.now() - lastToolbarPressTime < 500;
+  }
+
+  // Shared activation for toolbar icon presses. pointerdown fires BEFORE the
+  // host page (LinkedIn modal) can blur/clear the selection and before any
+  // capture-phase dismiss handler runs, so activating here wins the race;
+  // the click that follows within 500ms is deduped via lastHandledPressTime.
+  function handleIconPress(e, handler) {
+    e.preventDefault();
+    e.stopPropagation();
+    recordToolbarPress();
+    // Capture the toolbar's on-screen rect BEFORE hiding: hideToolbar() sets
+    // display:none, after which getBoundingClientRect() returns zeros and
+    // positionPopup() would clamp to (8,8). lastAnchorRect keeps the popup
+    // anchored to the cursor/toolbar position.
+    captureToolbarRect();
+    // Hide the 5-icon toolbar immediately, before handler(e), so no poll or
+    // selectionchange can re-show it mid-request. hideToolbar() only toggles
+    // visibility (display/:popover-open) — it does NOT touch savedText or
+    // isTranslating, so the in-flight request keeps its captured text.
+    hideToolbar();
+    var now = Date.now();
+    if (now - lastHandledPressTime < 500) return; // click after pointerdown: already handled
+    lastHandledPressTime = now;
+    handler(e);
+  }
+
+  // Snapshot the visible toolbar's rect into lastAnchorRect (ignores zero-size
+  // i.e. hidden/not-yet-laid-out elements).
+  function captureToolbarRect() {
+    if (!toolbarEl) return;
+    var r = toolbarEl.getBoundingClientRect();
+    if (r && r.width > 0 && r.height > 0) {
+      lastAnchorRect = { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+    }
+  }
+
+  // Attach both pointerdown and click activation to an icon div.
+  function bindIconActivation(iconEl, handler) {
+    iconEl.addEventListener("pointerdown", function (e) {
+      handleIconPress(e, handler);
+    });
+    iconEl.addEventListener("click", function (e) {
+      handleIconPress(e, handler);
+    });
+  }
+
+  // Delegated activation in CAPTURE phase. Bubble-phase per-icon listeners are
+  // unreliable when the toolbar is in the top layer (popover retargeting /
+  // listener-world mismatch); document-level capture listeners always see the
+  // event, same as the dismiss handlers that do fire.
+  function routeIconPress(ic, e) {
+    var name, handler;
+    if (ic.classList.contains("ht-translate-icon")) { name = "translate"; handler = onIconClick; }
+    else if (ic.classList.contains("ht-humanize-icon")) { name = "humanize"; handler = onHumanizeClick; }
+    else if (ic.classList.contains("ht-reply-icon")) { name = "reply"; handler = onReplyClick; }
+    else if (ic.classList.contains("ht-summary-icon")) { name = "summary"; handler = onSummaryClick; }
+    else if (ic.classList.contains("ht-social-icon")) { name = "social"; handler = onSocialClick; }
+    if (!handler) return;
+    console.log("[HT] ICON PRESS-DELEGATED", name);
+    handleIconPress(e, handler);
+  }
+
+  document.addEventListener("pointerdown", function (e) {
+    var ic = e.target && e.target.closest ? e.target.closest("#ht-toolbar .ht-icon") : null;
+    if (!ic) return;
+    e.preventDefault();
+    e.stopPropagation();
+    recordToolbarPress();
+    routeIconPress(ic, e);
+  }, true);
+
+  // Same delegated path for "click" so keyboard/AT activation still works;
+  // lastHandledPressTime dedupes the pointerdown+click double-fire.
+  document.addEventListener("click", function (e) {
+    var ic = e.target && e.target.closest ? e.target.closest("#ht-toolbar .ht-icon") : null;
+    if (!ic) return;
+    e.preventDefault();
+    e.stopPropagation();
+    recordToolbarPress();
+    routeIconPress(ic, e);
+  }, true);
+
+  // ---------------------------------------------------------------------------
+  // Top-layer promotion (Popover API).
+  // Native <dialog showModal>/popover elements render in the browser's top
+  // layer, which paints ABOVE any z-index (even 2147483647). Promoting our
+  // icons/popup via popover="manual" + showPopover() puts them in that same
+  // top layer so they stay visible above modal dialogs (e.g. LinkedIn composer).
+  // ---------------------------------------------------------------------------
+
+  function supportsPopover(el) {
+    return !!el && typeof el.showPopover === "function" && typeof el.hidePopover === "function";
+  }
+
+  function promoteToTopLayer(el) {
+    if (!supportsPopover(el)) return false; // graceful fallback: fixed + max z-index
+    try {
+      if (el.getAttribute("popover") !== "manual") el.setAttribute("popover", "manual");
+      if (!el.isConnected) return false; // showing a detached node throws
+      if (!el.matches(":popover-open")) el.showPopover(); // no-op-safe if already shown
+      return true;
+    } catch (e) {
+      // Some pages break popover (e.g. InvalidStateError on detached nodes); fall back silently.
+      return false;
+    }
+  }
+
+  function demoteFromTopLayer(el) {
+    if (!supportsPopover(el)) return;
+    try {
+      if (el.matches(":popover-open")) el.hidePopover();
+    } catch (e) { /* ignore */ }
   }
 
   // ---------------------------------------------------------------------------
@@ -247,20 +537,89 @@
   // DOM helpers
   // ---------------------------------------------------------------------------
 
-  function createIcon() {
-    if (iconEl) return iconEl;
+  // ---------------------------------------------------------------------------
+  // Single toolbar (the ONLY top-layer popover; 5 icon buttons are children).
+  // ---------------------------------------------------------------------------
 
-    iconEl = document.createElement("div");
-    iconEl.className = "ht-translate-icon";
-    iconEl.title = "Translate to Chinese";
-    iconEl.setAttribute("role", "button");
-    iconEl.setAttribute("aria-label", "Translate selected text");
-    iconEl.textContent = "\u8BD1"; // "译"
+  function createToolbar() {
+    if (toolbarEl) return toolbarEl;
 
-    iconEl.addEventListener("click", onIconClick);
-    console.log("[HT] Appending icon to shadow root in", window.location.hostname);
-    shadowRoot.appendChild(iconEl);
-    return iconEl;
+    toolbarEl = createHtmlElement("div");
+    toolbarEl.id = "ht-toolbar";
+    toolbarEl.className = "ht-toolbar";
+    toolbarEl.setAttribute("popover", "manual");
+
+    const icon = createHtmlElement("div");
+    icon.className = "ht-icon ht-translate-icon";
+    icon.title = "Translate to Chinese";
+    icon.setAttribute("role", "button");
+    icon.setAttribute("aria-label", "Translate selected text");
+    icon.textContent = "\u8BD1"; // "译"
+    bindIconActivation(icon, onIconClick);
+    iconEl = icon;
+
+    const humanizeIcon = createHtmlElement("div");
+    humanizeIcon.className = "ht-icon ht-humanize-icon";
+    humanizeIcon.title = "Improve text";
+    humanizeIcon.setAttribute("role", "button");
+    humanizeIcon.setAttribute("aria-label", "Improve selected text");
+    humanizeIcon.textContent = "AI";
+    bindIconActivation(humanizeIcon, onHumanizeClick);
+    humanizeIconEl = humanizeIcon;
+
+    const replyIcon = createHtmlElement("div");
+    replyIcon.className = "ht-icon ht-reply-icon";
+    replyIcon.title = "Craft a reply";
+    replyIcon.setAttribute("role", "button");
+    replyIcon.setAttribute("aria-label", "Craft a reply to selected text");
+    replyIcon.textContent = "\u2709";
+    bindIconActivation(replyIcon, onReplyClick);
+    replyIconEl = replyIcon;
+
+    const summaryIcon = createHtmlElement("div");
+    summaryIcon.className = "ht-icon ht-summary-icon";
+    summaryIcon.title = "Summarize as TL;DR";
+    summaryIcon.setAttribute("role", "button");
+    summaryIcon.setAttribute("aria-label", "Summarize selected text as TL;DR");
+    summaryIcon.textContent = "\u2211"; // ∑
+    bindIconActivation(summaryIcon, onSummaryClick);
+    summaryIconEl = summaryIcon;
+
+    const socialIcon = createHtmlElement("div");
+    socialIcon.className = "ht-icon ht-social-icon";
+    socialIcon.title = "Rewrite as social hook";
+    socialIcon.setAttribute("role", "button");
+    socialIcon.setAttribute("aria-label", "Rewrite selected text as a strong social hook");
+    socialIcon.textContent = "\u26A1"; // ⚡
+    bindIconActivation(socialIcon, onSocialClick);
+    socialIconEl = socialIcon;
+
+    // Keep the text selection alive and guard against dismissal when the user
+    // presses down on a button. recordToolbarPress() stamps a timestamp that
+    // dismiss() checks, so selection-clearing / debounced dismissals triggered
+    // by the mousedown cannot hide the toolbar before the button's click fires.
+    toolbarEl.addEventListener("mousedown", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      recordToolbarPress();
+    });
+    toolbarEl.addEventListener("mouseup", function (e) {
+      e.stopPropagation();
+      recordToolbarPress();
+    });
+    toolbarEl.addEventListener("click", function (e) {
+      e.stopPropagation();
+      recordToolbarPress();
+    });
+
+    toolbarEl.appendChild(icon);
+    toolbarEl.appendChild(humanizeIcon);
+    toolbarEl.appendChild(replyIcon);
+    toolbarEl.appendChild(summaryIcon);
+    toolbarEl.appendChild(socialIcon);
+
+    ensureInRoot(toolbarEl);
+    return toolbarEl;
   }
 
   function getBaseLanguage(languageCode) {
@@ -328,51 +687,6 @@
       }
       return languageCode;
     });
-  }
-
-  function createHumanizeIcon() {
-    if (humanizeIconEl) return humanizeIconEl;
-
-    humanizeIconEl = document.createElement("div");
-    humanizeIconEl.className = "ht-humanize-icon";
-    humanizeIconEl.title = "Improve text";
-    humanizeIconEl.setAttribute("role", "button");
-    humanizeIconEl.setAttribute("aria-label", "Improve selected text");
-    humanizeIconEl.textContent = "AI";
-
-    humanizeIconEl.addEventListener("click", onHumanizeClick);
-    shadowRoot.appendChild(humanizeIconEl);
-    return humanizeIconEl;
-  }
-
-  function createReplyIcon() {
-    if (replyIconEl) return replyIconEl;
-
-    replyIconEl = document.createElement("div");
-    replyIconEl.className = "ht-reply-icon";
-    replyIconEl.title = "Craft a reply";
-    replyIconEl.setAttribute("role", "button");
-    replyIconEl.setAttribute("aria-label", "Craft a reply to selected text");
-    replyIconEl.textContent = "\u2709";
-
-    replyIconEl.addEventListener("click", onReplyClick);
-    shadowRoot.appendChild(replyIconEl);
-    return replyIconEl;
-  }
-
-  function createSummaryIcon() {
-    if (summaryIconEl) return summaryIconEl;
-
-    summaryIconEl = document.createElement("div");
-    summaryIconEl.className = "ht-summary-icon";
-    summaryIconEl.title = "Summarize as TL;DR";
-    summaryIconEl.setAttribute("role", "button");
-    summaryIconEl.setAttribute("aria-label", "Summarize selected text as TL;DR");
-    summaryIconEl.textContent = "\u2211"; // ∑
-
-    summaryIconEl.addEventListener("click", onSummaryClick);
-    shadowRoot.appendChild(summaryIconEl);
-    return summaryIconEl;
   }
 
   function createPopup() {
@@ -444,40 +758,33 @@
     });
 
     closeBtn.addEventListener("click", closePopup);
-    shadowRoot.appendChild(popupEl);
+    ensureInRoot(popupEl);
+    promoteToTopLayer(popupEl);
     return popupEl;
   }
 
-  function removeIcon() {
-    if (iconEl) {
-      iconEl.remove();
-      iconEl = null;
+  function hideToolbar() {
+    // Hide the single toolbar (guarded hidePopover via :popover-open check).
+    if (toolbarEl) {
+      try {
+        if (toolbarEl.matches(":popover-open")) toolbarEl.hidePopover();
+      } catch (e) { /* ignore */ }
+      toolbarEl.style.display = "none";
     }
+    toolbarVisible = false;
   }
 
-  function removeHumanizeIcon() {
-    if (humanizeIconEl) {
-      humanizeIconEl.remove();
-      humanizeIconEl = null;
-    }
-  }
-
-  function removeReplyIcon() {
-    if (replyIconEl) {
-      replyIconEl.remove();
-      replyIconEl = null;
-    }
-  }
-
-  function removeSummaryIcon() {
-    if (summaryIconEl) {
-      summaryIconEl.remove();
-      summaryIconEl = null;
-    }
-  }
+  // Back-compat shims: callers previously removed individual icons; now they
+  // all just hide the single toolbar.
+  function removeIcon() { hideToolbar(); }
+  function removeHumanizeIcon() { hideToolbar(); }
+  function removeReplyIcon() { hideToolbar(); }
+  function removeSummaryIcon() { hideToolbar(); }
+  function removeSocialIcon() { hideToolbar(); }
 
   function removePopup() {
     if (popupEl) {
+      demoteFromTopLayer(popupEl);
       popupEl.remove();
       popupEl = null;
     }
@@ -489,10 +796,54 @@
 
   document.addEventListener("__ht_sel", function (e) {
     injectedSel = e.detail || null;
+    if (injectedSel && injectedSel.text) {
+      lastInjectedSelTime = Date.now();
+      // A fresh selection supersedes any pending debounced clear.
+      if (clearInjectedSelTimer) {
+        clearTimeout(clearInjectedSelTimer);
+        clearInjectedSelTimer = null;
+      }
+    }
     console.log("[HT] Received __ht_sel event, text:", injectedSel ? injectedSel.text.substring(0, 30) : "(null)");
+    // Always (re)schedule the icon using the injected text — even if the popup
+    // is already open, a fresh selection must still update savedText. showIcon()
+    // itself decides whether to (re)anchor.
+    if (injectedSel && injectedSel.text) {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(function () {
+        if (hasFreshInjectedSel() && hasLiveSelectionSource()) showIcon();
+      }, DEBOUNCE_MS);
+    }
   });
   document.addEventListener("__ht_sel_clear", function () {
-    injectedSel = null;
+    // A blur-clear during a toolbar icon press (or while translating) is
+    // noise, not user intent — keep the injected selection so freshness
+    // guards keep working. lastInjectedSelTime is untouched, so genuine
+    // clears still expire naturally after the freshness window.
+    // NOTE: toolbarVisible is deliberately NOT checked here — otherwise a
+    // genuine deselect after the toolbar is shown could never clear state.
+    if (isTranslating || isRecentToolbarPress()) return;
+    // A real (LIVE) selection still present means this is a blur-clear, not a
+    // deselect. We must NOT use getSelectedText() here: it returns the stale
+    // injectedSel.text that this event is about to clear, which would always
+    // early-return and re-deadlock the clear.
+    var liveSel = window.getSelection();
+    if (liveSel && !liveSel.isCollapsed && liveSel.toString().trim()) return;
+    // LinkedIn re-renders the composer and collapses the selection within a
+    // few hundred ms of our __ht_sel. Nulling injectedSel synchronously would
+    // beat the 300ms showIcon debounce (hasFreshInjectedSel → false) and the
+    // toolbar would never appear. Debounce the clear so the pending show wins;
+    // a follow-up __ht_sel cancels this timer.
+    if (clearInjectedSelTimer) clearTimeout(clearInjectedSelTimer);
+    clearInjectedSelTimer = setTimeout(function () {
+      clearInjectedSelTimer = null;
+      if (isTranslating || isRecentToolbarPress()) return;
+      if (hasFreshInjectedSel()) return; // a newer selection arrived meanwhile
+      injectedSel = null;
+      // Genuine deselect: drop the icons too, unless a popup is showing or a
+      // press/translation is in flight.
+      if (!popupEl && !isTranslating && !isRecentToolbarPress()) hideToolbar();
+    }, CLEAR_DEBOUNCE_MS);
   });
 
   // ---------------------------------------------------------------------------
@@ -500,11 +851,20 @@
   // ---------------------------------------------------------------------------
 
   function getSelectedText() {
-    // Prefer main-world selection data (fixes Brave isolation issue).
-    if (injectedSel && injectedSel.text) return injectedSel.text;
+    // Form fields keep their selection in a shadow tree; read it directly.
+    if (hasLiveFormFieldSelection()) {
+      try { return document.activeElement.value.substring(document.activeElement.selectionStart, document.activeElement.selectionEnd).trim(); } catch (e) { /* ignore */ }
+    }
     const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) return "";
-    return selection.toString().trim();
+    const nativeText = (selection && !selection.isCollapsed) ? selection.toString().trim() : "";
+    // Native selection is authoritative when present.
+    if (nativeText) return nativeText;
+    // Only fall back to main-world injected text when it is fresh AND a live
+    // selection corroborates it. A stale injectedSel must never resurrect text.
+    if (hasFreshInjectedSel() && hasLiveSelectionSource() && injectedSel && injectedSel.text) {
+      return injectedSel.text;
+    }
+    return "";
   }
 
   /**
@@ -513,17 +873,27 @@
    */
   function getSelectionPosition() {
     // Prefer mouse position for icon placement (more reliable than rect
-    // inside modals/overlays with CSS transforms).
+    // inside modals/overlays with CSS transforms). Icons are placed ABOVE the
+    // selection/cursor and clamped to the viewport ("shift to top" behavior);
+    // flipped below only when there is no room above.
     if (lastMousePos) {
-      let _top = lastMousePos.clientY + 10;
-      let _left = lastMousePos.clientX + 10;
       const _vw = window.innerWidth;
       const _vh = window.innerHeight;
-      if (_left + 36 > _vw) _left = lastMousePos.clientX - 44;
-      if (_top + 36 > _vh) _top = lastMousePos.clientY - 44;
-      if (_top < 4) _top = 4;
-      if (_left < 4) _left = 4;
-      return { top: _top, left: _left };
+      const MARGIN = 8;
+      // Anchor to the top of the selection when known (mouse Y sits at/below
+      // the highlight bottom); showIcon() builds the stack upward from here,
+      // so icons default ABOVE the selection ("shift to top") and only flip
+      // below when there is no room above (fitsAbove check in showIcon()).
+      let anchorY = lastMousePos.clientY;
+      if (injectedSel && injectedSel.rect && typeof injectedSel.rect.top === "number") {
+        anchorY = Math.min(anchorY, injectedSel.rect.top);
+      }
+      if (anchorY < MARGIN) anchorY = MARGIN;
+      if (anchorY > _vh - MARGIN) anchorY = _vh - MARGIN;
+      let _left = lastMousePos.clientX + 10;
+      if (_left + 36 > _vw - MARGIN) _left = lastMousePos.clientX - 44;
+      if (_left < MARGIN) _left = MARGIN;
+      return { top: anchorY, left: _left };
     }
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
@@ -554,15 +924,24 @@
 
     if (!bestRect) return { top: 0, left: 0 };
 
-    // Return the selection bottom-right corner; showIcon() places icons upward from here.
-    let top = bestRect.bottom;
-    let left = bestRect.right + 4;
+    // Return the selection TOP-LEFT anchor; showIcon() stacks the icons
+    // upward from here (so they default ABOVE the selection, "shift to top")
+    // and flips below only when there is no room above, with viewport clamps.
+    let top = bestRect.top;
+    let left = bestRect.left + 4;
 
     // Clamp within viewport.
     const vw = window.innerWidth;
+    const MARGIN = 8;
 
-    if (left + 36 > vw) {
-      left = vw - 40;
+    if (left + 36 > vw - MARGIN) {
+      left = vw - MARGIN - 36;
+    }
+    if (left < MARGIN) {
+      left = MARGIN;
+    }
+    if (top < MARGIN) {
+      top = MARGIN;
     }
 
     return { top, left };
@@ -573,9 +952,21 @@
   // ---------------------------------------------------------------------------
 
   function showIcon() {
-    const text = getSelectedText();
+    // HARD GATE: never show the toolbar without a LIVE non-collapsed selection.
+    // A fresh-but-stale injectedSel relayed from the main world (caret inside a
+    // word, ProseMirror range churn) is not user intent. Collapsed/empty native
+    // selection is treated as authoritative "no selection".
+    if (!hasLiveSelectionSource()) {
+      if (!popupEl && !isTranslating && !isRecentToolbarPress()) dismiss();
+      return;
+    }
+    // Prefer main-world injected text — isolated-world selection is unreliable
+    // inside LinkedIn's contenteditable. It is only trusted here because the
+    // hard gate above proved a live corroborating selection exists.
+    var text = (hasFreshInjectedSel() && injectedSel && injectedSel.text) || getSelectedText();
     console.log("[HT] showIcon in", window.location.hostname, "text:", text ? text.substring(0, 40) : "(empty)");
     if (!text) {
+      if (hasFreshInjectedSel()) return; // injected sel is truth; don't dismiss
       dismiss();
       return;
     }
@@ -613,7 +1004,7 @@
 
     // Fallback: search all contenteditable or marked elements for the selected text.
     if (!savedEditableEl && savedText) {
-      var candidates = document.querySelectorAll("[contenteditable='true'], [contenteditable=''], [data-ht-editable], [role='textbox'], textarea");
+      var candidates = document.querySelectorAll("[contenteditable='true'], [contenteditable=''], [data-ht-editable], [role='textbox'], .ProseMirror[contenteditable], .tiptap.ProseMirror, .ProseMirror[role='textbox'], textarea");
       for (var i = 0; i < candidates.length; i++) {
         if (candidates[i].textContent && candidates[i].textContent.indexOf(savedText) !== -1) {
           savedEditableEl = candidates[i];
@@ -625,72 +1016,69 @@
 
     console.log("[HT] showIcon: savedRange:", !!savedRange, "savedEditableEl:", !!savedEditableEl, "savedText:", savedText.substring(0, 30));
 
-    const icon = createIcon();
     refreshTranslateIconLabel(text);
     const { top, left } = getSelectionPosition();
-    const GAP = 36;
-    const ICON_H = 28; // icon height in px
-    const MARGIN = 4; // keep icons at least this far from viewport edges
-    const STACK_HEIGHT = ICON_H + GAP * 3; // total height of the 4-icon stack
+    // Single toolbar layout: 5 icons in a flex row, anchored near the cursor,
+    // clamped to the viewport. Estimated size: 180 x 36 px.
+    const ROW_WIDTH = 5 * 28 + 4 * 6; // 164px icons+gaps
+    const MARGIN = 8;
 
-    // Icons go upward from selection bottom — 4th icon top edge at the cursor.
-    // If the whole stack does NOT fit above the cursor (e.g. text highlighted
-    // at the very top of the page), flip it BELOW the cursor so the 1st icon
-    // starts below the mouse cursor instead of running off-screen.
-    const fitsAbove = top - STACK_HEIGHT >= MARGIN;
-
-    let iconTop, humanizeTop, replyTop, summaryTop;
-    if (fitsAbove) {
-      const base = top - ICON_H;
-      iconTop = base - GAP * 3;
-      humanizeTop = base - GAP * 2;
-      replyTop = base - GAP;
-      summaryTop = base;
+    // Anchor preference: fresh mouse position (<1500ms) → injectedSel focus
+    // point → selection rect end → getSelectionPosition() fallback. Never use
+    // the multi-line bounding rect.right as the primary anchor.
+    const now = Date.now();
+    const mouseFresh = lastMousePos && (now - lastMouseTime) < 1500;
+    let anchorX, anchorY;
+    if (mouseFresh) {
+      anchorX = lastMousePos.clientX + 12;
+      anchorY = lastMousePos.clientY + 12;
+    } else if (injectedSel && injectedSel.rect && typeof injectedSel.rect.right === "number") {
+      anchorX = injectedSel.rect.right + 8;
+      anchorY = injectedSel.rect.bottom + 8;
     } else {
-      iconTop = top + 6; // 1st icon starts just below the mouse cursor
-      humanizeTop = top + 6 + GAP;
-      replyTop = top + 6 + GAP * 2;
-      summaryTop = top + 6 + GAP * 3;
+      anchorX = left + 8;
+      anchorY = top + 8;
     }
 
-    // Keep the whole group on-screen vertically (safety net for short viewports).
+    // Clamp to viewport so the whole toolbar stays on-screen.
+    // Toolbar size: 5 * 28px icons + 4 * 6px gaps + 8px padding ≈ 180x36.
+    const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const groupBottom = summaryTop + ICON_H;
-    if (groupBottom > vh - MARGIN) {
-      const shift = vh - MARGIN - groupBottom;
-      iconTop += shift;
-      humanizeTop += shift;
-      replyTop += shift;
-      summaryTop += shift;
+    const rowLeft = Math.min(Math.max(anchorX, MARGIN), Math.max(MARGIN, vw - ROW_WIDTH - 12 - MARGIN));
+    const rowTop = Math.min(Math.max(anchorY, MARGIN), Math.max(MARGIN, vh - 40 - MARGIN));
+
+    const toolbar = createToolbar();
+    // Show ordering: make displayable BEFORE showPopover — a popover with
+    // display:none cannot be promoted to the top layer.
+    toolbar.style.left = rowLeft + "px";
+    toolbar.style.top = rowTop + "px";
+    toolbar.style.display = "flex";
+    // Parent into the active modal dialog (if any) — a body-anchored node is
+    // inert while a showModal() dialog is open, so it must live inside the
+    // dialog to receive pointer events. ensureInRoot performs the single
+    // append+demote; if the root changed (or the node was reparented), the
+    // promote step below runs AFTER the move so the popover is restored.
+    var uiRoot = ensureInRoot(toolbar);
+    var rootChanged = lastUiRoot !== uiRoot;
+    lastUiRoot = uiRoot;
+    // A reparent hides a shown popover, so re-promote whenever the root changed
+    // or the toolbar was already visible. First-ever show also reaches here via
+    // rootChanged (null -> host); the fallback below keeps it clickable.
+    if (rootChanged || toolbarVisible) {
+      demoteFromTopLayer(toolbar); // reset before re-promoting the moved node
     }
-    if (iconTop < MARGIN) {
-      const shift = MARGIN - iconTop;
-      iconTop += shift;
-      humanizeTop += shift;
-      replyTop += shift;
-      summaryTop += shift;
+    toolbarVisible = true;
+    if (toolbar.isConnected) {
+      if (!promoteToTopLayer(toolbar)) {
+        // Fallback: fixed + max z-index (already display:flex above).
+        try { if (!toolbar.matches(":popover-open")) toolbar.showPopover(); } catch (e) { /* ignore */ }
+      }
     }
-
-    icon.style.top = iconTop + "px";
-    icon.style.left = left + "px";
-    icon.style.display = "block";
-
-    const humanizeIcon = createHumanizeIcon();
-    humanizeIcon.style.top = humanizeTop + "px";
-    humanizeIcon.style.left = left + "px";
-    humanizeIcon.style.display = "block";
-
-    const replyIcon = createReplyIcon();
-    replyIcon.style.top = replyTop + "px";
-    replyIcon.style.left = left + "px";
-    replyIcon.style.display = "block";
-
-    const summaryIcon = createSummaryIcon();
-    summaryIcon.style.top = summaryTop + "px";
-    summaryIcon.style.left = left + "px";
-    summaryIcon.style.display = "block";
 
     resetDismissTimer();
+    // Authoritative on-screen position: persist it so a later icon press can
+    // anchor the popup here even after this toolbar is display:none'd.
+    captureToolbarRect();
   }
 
   /** Expand popup width to fit content (up to viewport limit). */
@@ -715,10 +1103,26 @@
     if (!popupEl) return;
 
     // Position relative to whichever icon triggered it.
-    let anchorEl = summaryIconEl || replyIconEl || humanizeIconEl || iconEl;
+    let anchorEl = socialIconEl || summaryIconEl || replyIconEl || humanizeIconEl || iconEl;
     if (!anchorEl) return;
 
-    const anchorRect = anchorEl.getBoundingClientRect();
+    // Anchor: prefer the cached visible-toolbar rect (captured before hiding);
+    // else the live anchor (may be zero-size if display:none); else the last
+    // mouse position; else a fixed (120,120). Never let a zero rect clamp the
+    // popup to the top-left corner.
+    let anchorRect = null;
+    if (lastAnchorRect && lastAnchorRect.width > 0 && lastAnchorRect.height > 0) {
+      anchorRect = lastAnchorRect;
+    } else {
+      const live = anchorEl.getBoundingClientRect();
+      if (live && live.width > 0 && live.height > 0) {
+        anchorRect = live;
+      } else {
+        const mx = lastMousePos ? lastMousePos.clientX : 120;
+        const my = lastMousePos ? lastMousePos.clientY : 120;
+        anchorRect = { left: mx, top: my, right: mx + 40, bottom: my + 40, width: 40, height: 40 };
+      }
+    }
     const vh = window.innerHeight;
     const vw = window.innerWidth;
     const margin = 8;
@@ -773,7 +1177,7 @@
 
     loadingEl.style.display = "none";
     sourceEl.style.display = sourceText ? "block" : "none";
-    replaceBtn.style.display = (actionType === "translate" || actionType === "improve") ? "" : "none";
+    replaceBtn.style.display = (actionType === "translate" || actionType === "improve" || actionType === "social") ? "" : "none";
 
     if (sourceText && sourceText.length > MAX_SOURCE_LENGTH) {
       sourceText = sourceText.substring(0, MAX_SOURCE_LENGTH) + "...";
@@ -781,6 +1185,8 @@
     sourceEl.textContent = sourceText || "";
     resultEl.textContent = translatedText;
     popup.style.display = "block";
+    ensureInRoot(popup); // re-anchor in case dialog context changed
+    promoteToTopLayer(popup); // re-promote each show, AFTER display is set
 
     // Auto-resize to fit content, then reposition.
     resizePopupToFit();
@@ -800,18 +1206,32 @@
     sourceEl.textContent = "";
     sourceEl.style.display = "none";
     popup.style.display = "block";
+    promoteToTopLayer(popup);
 
     resizePopupToFit();
     positionPopup();
   }
 
   function dismiss() {
+    // Never dismiss while a translate request is in flight or a popup exists.
+    if (isTranslating || popupEl) return;
     // Never auto-remove the popup — only explicit user action (close button / Escape) can close it.
     // This prevents X.com Draft.js and other frameworks from dismissing the popup via synthetic events.
+    // Ignore dismissal while a toolbar button press is in flight (mousedown→click).
+    if (isRecentToolbarPress()) return;
+    // toolbarVisible + savedText means the user selected text and is aiming at
+    // the toolbar — treat as intent. Only auto-dismiss if the injected selection
+    // went stale (>3s) with no toolbar press in flight.
+    if (toolbarVisible && savedText && hasFreshInjectedSel(1500) && hasLiveSelectionSource() && !popupEl) return;
+    // A fresh main-world selection is truth — don't dismiss on unreliable
+    // isolated-world empty-selection reports (LinkedIn contenteditable). Only
+    // when a live selection corroborates it; a stale injectedSel must not.
+    if (hasFreshInjectedSel() && hasLiveSelectionSource() && !popupEl) return;
     removeIcon();
     removeHumanizeIcon();
     removeReplyIcon();
     removeSummaryIcon();
+    removeSocialIcon();
     clearDismissTimer();
     isTranslating = false;
   }
@@ -823,6 +1243,7 @@
     removeHumanizeIcon();
     removeReplyIcon();
     removeSummaryIcon();
+    removeSocialIcon();
     clearDismissTimer();
     isTranslating = false;
     savedRange = null;
@@ -854,8 +1275,9 @@
   function startSelectionPolling() {
     var _pollCount = 0;
     setInterval(function () {
-      // Only poll if no popup is currently shown
-      if (popupEl) return;
+      // Only poll if no popup is currently shown, and never dismiss while a
+      // translate request is in flight (popup may not exist yet during loading).
+      if (popupEl || isTranslating) return;
       var text = getSelectedText();
       var rawSel = window.getSelection();
       _pollCount++;
@@ -867,10 +1289,25 @@
           "rangeCount:", rawSel ? rawSel.rangeCount : 0,
           "icon:", !!iconEl);
       }
-      if (text && !iconEl) {
+      if (text && hasLiveSelectionSource() && !iconEl) {
         showIcon();
-      } else if (!text && iconEl && !popupEl) {
-        // Selection was cleared while polling
+      } else if (!text && iconEl && !popupEl && !isRecentToolbarPress()) {
+        // Selection was cleared while polling (skip during toolbar button press)
+        // Isolated-world empty selection is unreliable in LinkedIn contenteditable.
+        if (hasLiveSelectionSource()) return;
+        dismiss();
+      }
+      // Hard expiry: a visible toolbar whose selection is genuinely gone (no
+      // live native/form-field selection) must not linger. A stale injectedSel
+      // alone is NOT a reason to keep it. Guarded so a press or in-flight
+      // translation is never interrupted (popupEl/isTranslating returned above).
+      if (
+        toolbarVisible &&
+        !hasLiveSelectionSource() &&
+        !isRecentToolbarPress() &&
+        !isTranslating &&
+        !popupEl
+      ) {
         dismiss();
       }
     }, POLL_INTERVAL_MS);
@@ -881,6 +1318,7 @@
   // ---------------------------------------------------------------------------
 
   function onIconClick(e) {
+    console.log("[HT] ICON PRESS", "icon", "savedText:", (savedText || "").substring(0, 30));
     e.preventDefault();
     e.stopPropagation();
     clearDismissTimer();
@@ -889,9 +1327,16 @@
     if (!text || isTranslating) return;
 
     isTranslating = true;
-    showLoading();
+    try { showLoading(); } catch (err) { isTranslating = false; }
+    var safetyTimer = setTimeout(function () {
+      if (isTranslating) {
+        isTranslating = false;
+        showPopup("Request timed out. Please try again.", text);
+      }
+    }, 30000);
 
     sendMessageSafe("translate", text).then((response) => {
+      clearTimeout(safetyTimer);
       isTranslating = false;
 
       if (response.error === 'CONTEXT_INVALID') {
@@ -912,6 +1357,7 @@
   }
 
   function onHumanizeClick(e) {
+    console.log("[HT] ICON PRESS", "humanize", "savedText:", (savedText || "").substring(0, 30));
     e.preventDefault();
     e.stopPropagation();
     clearDismissTimer();
@@ -920,9 +1366,16 @@
     if (!text || isTranslating) return;
 
     isTranslating = true;
-    showLoading();
+    try { showLoading(); } catch (err) { isTranslating = false; }
+    var safetyTimer = setTimeout(function () {
+      if (isTranslating) {
+        isTranslating = false;
+        showPopup("Request timed out. Please try again.", text);
+      }
+    }, 30000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("improve", text, { languageCode: languageCode })).then((response) => {
+      clearTimeout(safetyTimer);
       isTranslating = false;
 
       if (response.error === 'CONTEXT_INVALID') {
@@ -935,7 +1388,7 @@
       } else if (response && response.error === "NO_API_KEY") {
         var msg =
           "No AI provider configured. " +
-          "<a href='" + chrome.runtime.getURL("options.html") +
+          "<a href='" + htExtUrl("options.html") +
           "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
           " to set up your AI provider.";
         var popup = createPopup();
@@ -961,6 +1414,7 @@
   }
 
   function onReplyClick(e) {
+    console.log("[HT] ICON PRESS", "reply", "savedText:", (savedText || "").substring(0, 30));
     e.preventDefault();
     e.stopPropagation();
     clearDismissTimer();
@@ -969,9 +1423,16 @@
     if (!text || isTranslating) return;
 
     isTranslating = true;
-    showLoading();
+    try { showLoading(); } catch (err) { isTranslating = false; }
+    var safetyTimer = setTimeout(function () {
+      if (isTranslating) {
+        isTranslating = false;
+        showPopup("Request timed out. Please try again.", text);
+      }
+    }, 30000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("reply", text, { languageCode: languageCode })).then((response) => {
+      clearTimeout(safetyTimer);
       isTranslating = false;
 
       if (response.error === 'CONTEXT_INVALID') {
@@ -984,7 +1445,7 @@
       } else if (response && response.error === "NO_API_KEY") {
         var msg =
           "No AI provider configured. " +
-          "<a href='" + chrome.runtime.getURL("options.html") +
+          "<a href='" + htExtUrl("options.html") +
           "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
           " to set up your AI provider.";
         var popup = createPopup();
@@ -1010,6 +1471,7 @@
   }
 
   function onSummaryClick(e) {
+    console.log("[HT] ICON PRESS", "summary", "savedText:", (savedText || "").substring(0, 30));
     e.preventDefault();
     e.stopPropagation();
     clearDismissTimer();
@@ -1018,9 +1480,16 @@
     if (!text || isTranslating) return;
 
     isTranslating = true;
-    showLoading();
+    try { showLoading(); } catch (err) { isTranslating = false; }
+    var safetyTimer = setTimeout(function () {
+      if (isTranslating) {
+        isTranslating = false;
+        showPopup("Request timed out. Please try again.", text);
+      }
+    }, 30000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("summarize", text, { languageCode: languageCode })).then((response) => {
+      clearTimeout(safetyTimer);
       isTranslating = false;
 
       if (response.error === 'CONTEXT_INVALID') {
@@ -1033,7 +1502,7 @@
       } else if (response && response.error === "NO_API_KEY") {
         var msg =
           "No AI provider configured. " +
-          "<a href='" + chrome.runtime.getURL("options.html") +
+          "<a href='" + htExtUrl("options.html") +
           "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
           " to set up your AI provider.";
         var popup = createPopup();
@@ -1058,6 +1527,63 @@
     });
   }
 
+  function onSocialClick(e) {
+    console.log("[HT] ICON PRESS", "social", "savedText:", (savedText || "").substring(0, 30));
+    e.preventDefault();
+    e.stopPropagation();
+    clearDismissTimer();
+
+    const text = savedText || getSelectedText();
+    if (!text || isTranslating) return;
+
+    isTranslating = true;
+    try { showLoading(); } catch (err) { isTranslating = false; }
+    var safetyTimer = setTimeout(function () {
+      if (isTranslating) {
+        isTranslating = false;
+        showPopup("Request timed out. Please try again.", text);
+      }
+    }, 30000);
+
+    getLanguageHintForText(text).then((languageCode) => sendMessageSafe("social", text, { languageCode: languageCode })).then((response) => {
+      clearTimeout(safetyTimer);
+      isTranslating = false;
+
+      if (response.error === 'CONTEXT_INVALID') {
+        showPopup("Extension reloaded. Please refresh the page.", text);
+        return;
+      }
+
+      if (response.success) {
+        showPopup(response.translatedText, text, "social");
+      } else if (response && response.error === "NO_API_KEY") {
+        var msg =
+          "No AI provider configured. " +
+          "<a href='" + htExtUrl("options.html") +
+          "' target='_blank' style='color:#1a73e8;'>Open settings</a>" +
+          " to set up your AI provider.";
+        var popup = createPopup();
+        var sourceEl = popup.querySelector(".ht-source");
+        var loadingEl = popup.querySelector(".ht-loading");
+        var resultEl = popup.querySelector(".ht-result");
+        loadingEl.style.display = "none";
+        sourceEl.style.display = "none";
+        resultEl.innerHTML = msg;
+        popup.style.display = "block";
+        positionPopup();
+        clearDismissTimer();
+      } else if (response && response.error === "API_ERROR") {
+        showPopup(response.translatedText || "API error occurred.", text);
+      } else {
+        var fallback =
+          response && response.translatedText
+            ? response.translatedText
+            : "Failed to rewrite hook. Please try again.";
+        showPopup(fallback, text);
+      }
+    });
+  }
+
   function onMouseUp(e) {
     // Don't reposition icon when clicking inside the extension's shadow DOM.
     if (isInsideExtension(e)) {
@@ -1068,10 +1594,20 @@
     // Debounce to avoid flicker while the user is still selecting.
     clearTimeout(debounceTimer);
     lastMousePos = { clientX: e.clientX, clientY: e.clientY };
+    lastMouseTime = Date.now();
     console.log("[HT] mouseUp in", window.location.hostname, "target:", e.target && e.target.tagName);
     debounceTimer = setTimeout(function () {
+      // The press may have happened DURING the wait — re-check here.
+      if (isTranslating) return;
+      // A toolbar button press may clear the selection before click fires —
+      // do not dismiss if this mouseup landed on (or right after) the toolbar.
+      if (isRecentToolbarPress()) return;
       var text = getSelectedText();
-      if (text) {
+      if (text && hasLiveSelectionSource()) {
+        showIcon();
+      } else if (hasFreshInjectedSel() && hasLiveSelectionSource()) {
+        // Isolated-world selection reads empty; injected sel is truth — but
+        // only with a live native/form-field selection corroborating it.
         showIcon();
       } else {
         dismiss();
@@ -1082,20 +1618,36 @@
   function onDocumentClick(e) {
     // Only remove floating icons when clicking outside the extension's shadow DOM.
     // The popup stays until explicitly closed (X button or Escape).
-    if (!isInsideExtension(e)) {
-      removeIcon();
-      removeHumanizeIcon();
-      removeReplyIcon();
-      removeSummaryIcon();
-      clearDismissTimer();
-      isTranslating = false;
-    }
+    // Defer to a macrotask so a genuine toolbar icon click (whose own handler
+    // runs first in bubble phase) always wins the race; re-check containment
+    // inside the deferred callback before hiding anything.
+    if (isInsideExtension(e)) return;
+    setTimeout(function () {
+      // A press in flight must never be torn down by a deferred outside-click.
+      if (isTranslating || popupEl) return;
+      if (isInsideExtension(e)) return; // click landed on toolbar/popup: never dismiss
+      if (isRecentToolbarPress()) return;
+      if (!iconEl && !humanizeIconEl && !replyIconEl && !summaryIconEl && !socialIconEl) return;
+      dismiss();
+    }, 0);
   }
 
   function onKeyDown(e) {
     if (e.key === "Escape") {
       closePopup();
     }
+  }
+
+  function onMouseMove(e) {
+    // Track the cursor continuously so the toolbar always anchors at the
+    // actual mouse position (e.g. when selecting backwards from "when").
+    lastMousePos = { clientX: e.clientX, clientY: e.clientY };
+    lastMouseTime = Date.now();
+  }
+
+  function onViewportShift() {
+    // Hide the toolbar on scroll/resize — its fixed position is stale.
+    if (toolbarVisible && !popupEl) hideToolbar();
   }
 
   function onSelectionChange() {
@@ -1107,11 +1659,17 @@
     // mouseup/pointerup events may be suppressed by the host page.
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(function () {
+      // The press may have happened DURING the 300ms wait — re-check here.
+      if (isTranslating) return;
       var text = getSelectedText();
+      // Suppress dismissal while a toolbar button press is in flight.
+      if (isRecentToolbarPress()) return;
       console.log("[HT] selChange in", window.location.hostname, "text:", text ? text.substring(0, 40) : "(empty)");
-      if (text && !popupEl) {
+      if (text && hasLiveSelectionSource() && !popupEl) {
         showIcon();
-      } else if (!text && (iconEl || humanizeIconEl || replyIconEl || summaryIconEl)) {
+      } else if (!text && (iconEl || humanizeIconEl || replyIconEl || summaryIconEl || socialIconEl)) {
+        // Isolated-world empty selection is unreliable in LinkedIn contenteditable.
+        if (hasFreshInjectedSel() && hasLiveSelectionSource()) return;
         dismiss();
       }
     }, DEBOUNCE_MS);
@@ -1128,16 +1686,40 @@
 
   document.addEventListener("mouseup", onMouseUp, true);
   document.addEventListener("pointerup", onMouseUp, true);  // touch / stylus support
+  document.addEventListener("mousemove", onMouseMove, { capture: true, passive: true });
+  document.addEventListener("scroll", onViewportShift, { capture: true, passive: true });
+  window.addEventListener("resize", onViewportShift, { passive: true });
   document.addEventListener("click", onDocumentClick, true);
+  // Bubble-phase click for outside-dismiss: capture-phase click on LinkedIn
+  // fires before the dialog's own handling; bubble-phase + closest() guard
+  // avoids the "click lands on toolbar but dismisses first" race.
+  document.addEventListener("click", function (e) {
+    if (isInsideExtension(e)) return;
+    if (!toolbarVisible && !popupEl) return;
+    if (toolbarEl && toolbarEl.contains(e.target)) return;
+    if (popupEl && popupEl.contains(e.target)) return;
+    // Defer: an icon's pointerdown/click handler (same press) must win first.
+    setTimeout(function () {
+      // A press in flight must never be torn down by a deferred outside-click.
+      if (isTranslating || popupEl) return;
+      if (isInsideExtension(e)) return;
+      if (isRecentToolbarPress()) return;
+      dismiss();
+    }, 0);
+  });
   document.addEventListener("keydown", onKeyDown, true);
   document.addEventListener("selectionchange", onSelectionChange, true);
 
   // Also listen on mousedown for sites that prevent mouseup propagation.
   document.addEventListener("mousedown", function () {
-    // Clear debounce on mousedown start of a new selection.
+    // Clear debounce on mousedown start of a new selection — but not when a
+    // fresh injected selection exists: the pending showIcon (e.g. from the
+    // comment-box selection) must survive the editor's focus-steal mousedown.
+    if (hasFreshInjectedSel()) return;
     clearTimeout(debounceTimer);
   }, true);
   document.addEventListener("pointerdown", function () {
+    if (hasFreshInjectedSel()) return;
     // Clear debounce on pointerdown (touch / stylus) start of a new selection.
     clearTimeout(debounceTimer);
   }, true);
@@ -1146,16 +1728,26 @@
 
   // Inject MAIN-world script via script src tag (bypasses page CSP).
   // LinkedIn's CSP allows chrome-extension:// scripts but blocks inline scripts.
-  var mainScript = document.createElement("script");
-  mainScript.src = chrome.runtime.getURL("content-main.js");
-  (document.head || document.documentElement).appendChild(mainScript);
-  mainScript.onload = function () {
-    console.log("[HT] MAIN-world script loaded via src tag");
-    mainScript.remove();
-  };
-  mainScript.onerror = function () {
-    console.error("[HT] MAIN-world script failed to load");
-  };
+  var mainUrls;
+  try {
+    mainUrls = chrome.runtime && chrome.runtime.id ? chrome.runtime.getURL("content-main.js") : null;
+  } catch (e) {
+    mainUrls = null;
+  }
+  if (!mainUrls || mainUrls.indexOf("invalid") !== -1) {
+    console.log("[HT] skip main-world inject, context invalid");
+  } else {
+    var mainScript = document.createElement("script");
+    mainScript.src = mainUrls;
+    (document.head || document.documentElement).appendChild(mainScript);
+    mainScript.onload = function () {
+      console.log("[HT] MAIN-world script loaded via src tag");
+      mainScript.remove();
+    };
+    mainScript.onerror = function () {
+      console.error("[HT] MAIN-world script failed to load");
+    };
+  }
 
   startSelectionPolling();
 })();

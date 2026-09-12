@@ -11,6 +11,11 @@
 (function () {
   "use strict";
 
+  // NOTE: the isolated world's `window` is a DIFFERENT object from this MAIN
+  // world's `window` — a cross-world `__ht_dead` flag is unobservable here and
+  // was removed. This script runs unconditionally after the security guards
+  // below (it needs no chrome.runtime access for its selection relay work).
+
   // ---------------------------------------------------------------------------
   // Security / anti-bot guard — same policy as content.js.
   // This script runs in the page's MAIN world, so it must be even more
@@ -53,10 +58,38 @@
     return;
   }
 
-  console.log("[HT-MAIN] MAIN-world script loaded on", window.location.hostname, "v3");
+  // Liveness marker, probeable from the SAME (main) world. Note: this is not
+  // visible to the isolated-world content script.
+  window.__ht_main_loaded = "v4";
+  console.log("[HT-MAIN] alive", location.hostname);
+
+  console.log("[HT-MAIN] MAIN-world script loaded on", window.location.hostname, "v4");
 
   var POLL_MS = 300;
   var lastText = "";
+  // Timestamp of the last REAL user selection gesture (mouseup/touchend/
+  // qualifying keyup). Editor-internal / programmatic range churn does NOT
+  // update this, so transient non-collapsed ranges during typing cannot arm
+  // the toolbar. See isRealUserTextRange() below.
+  var userSelectArmedAt = 0;
+  function armUserSelect() {
+    userSelectArmedAt = Date.now();
+  }
+  try {
+    document.addEventListener("mouseup", armUserSelect, true);
+    document.addEventListener("touchend", armUserSelect, true);
+    // Keyboard selection (Shift+Arrow) and select-all have no mouseup.
+    document.addEventListener("keyup", function (e) {
+      try {
+        if (!e) return;
+        var selectAll = (e.key === "a" || e.key === "A") && (e.ctrlKey || e.metaKey);
+        var shiftNav = e.shiftKey && /^(Arrow|Home|End|PageUp|PageDown)/.test(e.key || "");
+        if (selectAll || shiftNav) {
+          armUserSelect();
+        }
+      } catch (err) { /* ignore */ }
+    }, true);
+  } catch (e) { /* ignore */ }
   // Saved selection info for text replacement
   var savedSelRange = null;
   var savedSelText = "";
@@ -82,9 +115,48 @@
     }
   }
 
+  /**
+   * Returns true only for a selection that is a REAL user text range and safe
+   * to relay to the toolbar. Rejects transient non-collapsed ranges that
+   * ProseMirror/Tiptap produce while typing (node/all selections, whole-editor
+   * Select All, editor-chrome ranges) and programmatic Range churn.
+   */
+  function isRealUserTextRange(sel) {
+    try {
+      if (!sel || sel.rangeCount < 1) return false;
+      if (sel.isCollapsed) return false;
+      if (sel.type && sel.type !== "Range") return false; // reject Node/All
+      var range = sel.getRangeAt(0);
+      var txt = range.toString().trim();
+      if (txt.length < 2) return false;
+      if (txt.length > 20000) return false; // runaway Select All of whole editor
+
+      var ca = range.commonAncestorContainer;
+      if (!ca) return false;
+      if (ca.nodeType === 3) return true; // ordinary text node
+      // Element container: only accept if anchored inside a real editable /
+      // form control; never the whole-body / whole-editor chrome range.
+      var el = ca.nodeType === 1 ? ca : ca.parentElement;
+      if (!el || !el.closest) return false;
+      if (el.closest("[data-lexical-editor]")) return true;
+      if (el.closest(".ProseMirror, [contenteditable=true], [contenteditable=''], textarea, input")) {
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
   setInterval(function () {
     var sel = window.getSelection();
-    var text = sel ? sel.toString().trim() : "";
+    var text = isRealUserTextRange(sel) ? sel.toString().trim() : "";
+
+    // Require a recent real user gesture for a FIRST dispatch of NEW text.
+    // Keyboard Shift+Arrow / Ctrl+A arm via keyup; mouse drags via mouseup.
+    if (text && text !== lastText && Date.now() - userSelectArmedAt >= 5000) {
+      return;
+    }
 
     if (text && text !== lastText) {
       lastText = text;
@@ -99,7 +171,16 @@
         try {
           var r = sel.getRangeAt(0).getBoundingClientRect();
           if (r.width > 0 && r.height > 0) {
-            rect = { top: r.bottom + 4, left: r.right + 4 };
+            // Send the full rect (top/bottom/left/right) so content.js can
+            // anchor the icon cluster ABOVE the selection ("shift to top").
+            rect = {
+              top: r.top,
+              bottom: r.bottom,
+              left: r.left,
+              right: r.right,
+              width: r.width,
+              height: r.height
+            };
           }
         } catch (e) { /* ignore */ }
       }
@@ -125,8 +206,27 @@
         }
       } catch (e) { /* ignore */ }
 
+      // ProseMirror/Tiptap editors (e.g. LinkedIn's composer) expose neither
+      // contenteditable="true" nor a native selection in the isolated world.
+      // If activeElement is one of these, capture its editable root, tag it
+      // (markEditable) and relay editableId so content.js can refocus/replace.
+      var editableId = null;
+      try {
+        var _ae = document.activeElement;
+        var _pm = null;
+        if (_ae && _ae.closest) {
+          _pm = (_ae.matches && _ae.matches(".ProseMirror[role=textbox]"))
+            ? _ae
+            : _ae.closest(".ProseMirror");
+        }
+        if (_pm) {
+          editableId = markEditable(_pm);
+          if (editableId) console.log("[HT-MAIN] ProseMirror editable captured:", editableId);
+        }
+      } catch (e) { /* ignore */ }
+
       document.dispatchEvent(
-        new CustomEvent("__ht_sel", { detail: { text: text, rect: rect } })
+        new CustomEvent("__ht_sel", { detail: { text: text, rect: rect, editableId: editableId } })
       );
     } else if (!text && lastText) {
       lastText = "";
