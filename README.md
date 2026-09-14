@@ -37,16 +37,6 @@ Select text on any webpage and instantly translate it to Chinese, or improve you
 
 After installing the extension, right-click the toolbar icon and select **Options** (or go to `chrome://extensions/`, find Highlight Translate, and click **Details > Extension options**).
 
-### Gemini API Key (required for Grammar & Humanize)
-
-The Grammar & Humanize feature uses Google Gemini. You need a free API key:
-
-1. Go to [Google AI Studio](https://aistudio.google.com/apikey) and generate an API key
-2. Paste the key into the **Gemini API Key** field in Settings
-3. Click **Save**
-
-The translate feature continues to work without an API key (it uses Google Translate). Only the sparkle icon requires a Gemini key.
-
 ### Custom Prompt (optional)
 
 You can customize the improvement instructions used by the sparkle icon. Enter any prompt in the **Custom Prompt** field, for example:
