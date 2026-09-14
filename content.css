@@ -3,149 +3,51 @@
    All classes prefixed with "ht-" to avoid collisions with host page.
    ========================================================================== */
 
-/* ---- Translate icon (floating button) ---- */
+/* ---- Floating toolbar (single popover container for all 5 icons) ---- */
 
-.ht-translate-icon {
+.ht-toolbar {
   position: fixed;
+  margin: 0;
+  inset: auto;
+  display: none; /* toggled to flex from content.js */
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  background: #ffffff;
+  border: 1px solid #d0d0d0;
+  border-radius: 24px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  z-index: 2147483647;
+  pointer-events: auto;
+  user-select: none;
+}
+
+/* Each icon: 28x28 circle, flex none (no per-icon popover). */
+.ht-toolbar .ht-icon {
+  flex: none;
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background-color: #ffffff;
-  border: 1px solid #d0d0d0;
-  color: #1a73e8;
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 28px;
-  text-align: center;
-  cursor: pointer;
-  z-index: 2147483647;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-  user-select: none;
-  display: none;
-  pointer-events: auto;
-  transition: box-shadow 0.15s ease, border-color 0.15s ease;
-}
-
-.ht-translate-icon:hover {
-  border-color: #1a73e8;
-  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.3);
-}
-
-.ht-translate-icon:active {
-  transform: scale(0.92);
-}
-
-/* ---- Humanize icon (grammar + improve) ---- */
-
-.ht-humanize-icon {
-  position: fixed;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background-color: #ffffff;
-  border: 1px solid #d0d0d0;
-  color: #9334e6;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 28px;
-  text-align: center;
-  cursor: pointer;
-  z-index: 2147483647;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-  user-select: none;
-  display: none;
-  pointer-events: auto;
-  transition: box-shadow 0.15s ease, border-color 0.15s ease;
-}
-
-.ht-humanize-icon:hover {
-  border-color: #9334e6;
-  box-shadow: 0 2px 8px rgba(147, 52, 230, 0.3);
-}
-
-.ht-humanize-icon:active {
-  transform: scale(0.92);
-}
-
-/* ---- Reply icon ---- */
-
-.ht-reply-icon {
-  position: fixed;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background-color: #ffffff;
-  border: 1px solid #d0d0d0;
-  color: #0d652d;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 28px;
-  text-align: center;
-  cursor: pointer;
-  z-index: 2147483647;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-  user-select: none;
-  display: none;
-  pointer-events: auto;
-  transition: box-shadow 0.15s ease, border-color 0.15s ease;
-}
-
-.ht-reply-icon:hover {
-  border-color: #0d652d;
-  box-shadow: 0 2px 8px rgba(13, 101, 45, 0.3);
-}
-
-.ht-reply-icon:active {
-  transform: scale(0.92);
-}
-
-/* ---- Summary icon (TL;DR) ---- */
-
-.ht-summary-icon {
-  position: fixed;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background-color: #ffffff;
-  border: 1px solid #d0d0d0;
-  color: #00897b;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 28px;
-  text-align: center;
-  cursor: pointer;
-  z-index: 2147483647;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
-  user-select: none;
-  display: none;
-  pointer-events: auto;
-  transition: box-shadow 0.15s ease, border-color 0.15s ease;
-}
-
-.ht-summary-icon:hover {
-  border-color: #00897b;
-  box-shadow: 0 2px 8px rgba(0, 137, 123, 0.3);
-}
-
-.ht-summary-icon:active {
-  transform: scale(0.92);
-}
-
-.ht-translate-icon,
-.ht-humanize-icon,
-.ht-reply-icon,
-.ht-summary-icon {
   background-color: #1a73e8;
-  border-color: #1a73e8;
+  border: none;
   color: #ffffff;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 28px;
+  text-align: center;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
 
-.ht-translate-icon:hover,
-.ht-humanize-icon:hover,
-.ht-reply-icon:hover,
-.ht-summary-icon:hover {
-  border-color: #1558b0;
+.ht-toolbar .ht-icon:hover {
   box-shadow: 0 2px 8px rgba(26, 115, 232, 0.35);
+}
+
+.ht-toolbar .ht-icon:active {
+  transform: scale(0.92);
 }
 
 /* ---- Translation popup card ---- */
@@ -169,6 +71,10 @@
   display: none;
   pointer-events: auto;
   animation: ht-fade-in 0.15s ease-out;
+  /* Keep popover UA reset (margin, background) from breaking our layout when
+     the element is promoted to the top layer via showPopover(). */
+  margin: 0;
+  inset: auto;
 }
 
 @keyframes ht-fade-in {
