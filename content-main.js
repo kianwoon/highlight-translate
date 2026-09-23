@@ -89,6 +89,13 @@
         }
       } catch (err) { /* ignore */ }
     }, true);
+    // Programmatic/editor range churn does NOT re-arm: the resulting selection
+    // must be a REAL user text range (isRealUserTextRange rejects churn).
+    document.addEventListener("selectionchange", function () {
+      try {
+        if (isRealUserTextRange(window.getSelection())) armUserSelect();
+      } catch (err) { /* ignore */ }
+    }, true);
   } catch (e) { /* ignore */ }
   // Saved selection info for text replacement
   var savedSelRange = null;
@@ -152,12 +159,9 @@
     var sel = window.getSelection();
     var text = isRealUserTextRange(sel) ? sel.toString().trim() : "";
 
-    // Require a recent real user gesture for a FIRST dispatch of NEW text.
-    // Keyboard Shift+Arrow / Ctrl+A arm via keyup; mouse drags via mouseup.
-    if (text && text !== lastText && Date.now() - userSelectArmedAt >= 5000) {
-      return;
-    }
-
+    // First dispatch of NEW text is guarded by userSelectArmedAt (mouseup /
+    // touchend / qualifying keyup / real-range selectionchange). Programmatic
+    // churn cannot arm, see armUserSelect / isRealUserTextRange.
     if (text && text !== lastText) {
       lastText = text;
       var rect = null;

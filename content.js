@@ -161,6 +161,15 @@
   function hasLiveSelectionSource() {
     return hasLiveSelection() || hasLiveFormFieldSelection();
   }
+
+  // Liveness gate that ALSO accepts a very fresh main-world selection relay.
+  // injectedSel only exists when content-main.js observed a REAL non-collapsed
+  // user Range in the MAIN world (isRealUserTextRange) within the last
+  // FRESH_INJECTED_MS — that observation is authoritative even when the
+  // isolated-world getSelection() reads empty (Brave farbling, editors).
+  function hasReliableSelectionSource() {
+    return hasLiveSelectionSource() || hasFreshInjectedSel(800);
+  }
   let lastMousePos = null; // Tracks mouse position for toolbar placement
   // Authoritative on-screen rect of the toolbar, captured BEFORE hideToolbar()
   // sets display:none (which zeroes getBoundingClientRect on the anchor icon).
@@ -821,7 +830,7 @@
     if (injectedSel && injectedSel.text) {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(function () {
-        if (hasFreshInjectedSel() && hasLiveSelectionSource()) showIcon();
+        if (hasFreshInjectedSel() && hasReliableSelectionSource()) showIcon();
       }, DEBOUNCE_MS);
     }
   });
@@ -966,7 +975,7 @@
     // A fresh-but-stale injectedSel relayed from the main world (caret inside a
     // word, ProseMirror range churn) is not user intent. Collapsed/empty native
     // selection is treated as authoritative "no selection".
-    if (!hasLiveSelectionSource()) {
+    if (!hasReliableSelectionSource()) {
       if (!popupEl && !isTranslating && !isRecentToolbarPress()) dismiss();
       return;
     }
@@ -1301,7 +1310,7 @@
           "rangeCount:", rawSel ? rawSel.rangeCount : 0,
           "icon:", !!iconEl);
       }
-      if (text && hasLiveSelectionSource() && !iconEl) {
+      if (text && hasReliableSelectionSource() && !iconEl) {
         showIcon();
       } else if (!text && iconEl && !popupEl && !isRecentToolbarPress()) {
         // Selection was cleared while polling (skip during toolbar button press)
@@ -1615,9 +1624,9 @@
       // do not dismiss if this mouseup landed on (or right after) the toolbar.
       if (isRecentToolbarPress()) return;
       var text = getSelectedText();
-      if (text && hasLiveSelectionSource()) {
+      if (text && hasReliableSelectionSource()) {
         showIcon();
-      } else if (hasFreshInjectedSel() && hasLiveSelectionSource()) {
+      } else if (hasFreshInjectedSel() && hasReliableSelectionSource()) {
         // Isolated-world selection reads empty; injected sel is truth — but
         // only with a live native/form-field selection corroborating it.
         showIcon();
@@ -1677,7 +1686,7 @@
       // Suppress dismissal while a toolbar button press is in flight.
       if (isRecentToolbarPress()) return;
       console.log("[HT] selChange in", window.location.hostname, "text:", text ? text.substring(0, 40) : "(empty)");
-      if (text && hasLiveSelectionSource() && !popupEl) {
+      if (text && hasReliableSelectionSource() && !popupEl) {
         showIcon();
       } else if (!text && (iconEl || humanizeIconEl || replyIconEl || summaryIconEl || socialIconEl)) {
         // Isolated-world empty selection is unreliable in LinkedIn contenteditable.

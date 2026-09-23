@@ -335,17 +335,22 @@ async function fetchTranslation(text, targetLanguage) {
   return response.json();
 }
 
+// 1st toolbar icon = bidirectional translate: Chinese input → English,
+// everything else → Simplified Chinese. Direction is decided locally with a
+// CJK check so it never depends on Google's detectedLanguage field, which is
+// missing or wrong for short queries on the dict-chrome-ex endpoint.
+const CJK_IDEOGRAPH_REGEX = /[㐀-䶿一-鿿豈-﫿]/;
+
+function isChineseText(text) {
+  return CJK_IDEOGRAPH_REGEX.test(text);
+}
+
 async function handleTranslation(text) {
-  const initialData = await fetchTranslation(text, DEFAULT_TRANSLATION_TARGET);
-  const { translatedText, detectedLanguage } = extractTranslationParts(initialData);
-  const targetLanguage = getTranslationTargetForDetectedLanguage(detectedLanguage);
-
-  if (targetLanguage === DEFAULT_TRANSLATION_TARGET) {
-    return translatedText;
-  }
-
-  const translatedData = await fetchTranslation(text, targetLanguage);
-  return extractTranslatedText(translatedData);
+  const targetLanguage = isChineseText(text)
+    ? CHINESE_TRANSLATION_TARGET
+    : DEFAULT_TRANSLATION_TARGET;
+  const data = await fetchTranslation(text, targetLanguage);
+  return extractTranslatedText(data);
 }
 
 async function handleImprove(text, languageCode) {
@@ -739,6 +744,11 @@ function isAnthropicFormat(endpoint) {
 async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, maxTokens) {
   if (!model) throw new Error("Model required for AI Coding Plan");
 
+  // Thinking models (GLM/Flash etc.) burn output tokens on reasoning before
+  // emitting answer text. Guarantee a large floor so truncation doesn't eat the answer.
+  // floor 16384: safe under 256k-minimum context era (smallest model supports 256k, 1M models fine too).
+  if (maxTokens < 16384) maxTokens = 16384;
+
   const useAnthropic = isAnthropicFormat(endpoint);
   // Use endpoint URL as-is — user provides the full URL including path
   const url = endpoint;
@@ -767,17 +777,18 @@ async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, max
     body = JSON.stringify({
       model,
       max_tokens: maxTokens,
+      max_completion_tokens: maxTokens,
       system: [{ type: "text", text: systemMsg?.content || "" }],
       messages: userMessages,
       stream: false,
-    });
-  } else {
+    });  } else {
     headers["Authorization"] = `Bearer ${apiKey}`;
     body = JSON.stringify({
       model,
       messages,
       temperature: 0.7,
       max_tokens: maxTokens,
+      max_completion_tokens: maxTokens,
     });
   }
 
@@ -794,24 +805,89 @@ async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, max
 
   const data = await response.json();
 
-  // Try Anthropic format first (content array with text blocks)
+  const stopReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || "";
+
+  // Collects text strictly from answer text blocks (never thinking/reasoning).
+  // Accepts type "text"/"output_text" OR a missing/undefined type with a string .text
+  // (some non-thinking models omit the type field). Still excludes thinking-family types.
+  function blocksToText(blocks) {
+    if (!Array.isArray(blocks)) return "";
+    const EXCLUDE = /^(thinking|reasoning|reason|thought|analysis|tool_use|redacted)/i;
+    return blocks
+      .filter(b => b && typeof b.text === "string" && b.text.trim() &&
+        !EXCLUDE.test(b.type || "") &&
+        (b.type === "text" || b.type === "output_text" || b.type === undefined || b.type === null))
+      .map(b => b.text)
+      .join("\n")
+      .trim();
+  }
+
+  // Strips any embedded thinking/reasoning content from a candidate answer.
+  function cleanAnswer(s) {
+    if (typeof s !== "string") return "";
+    return s
+      .replace(/<(thinking|reasoning|reason|thought|analysis)>[\s\S]*?<\/(thinking|reasoning|reason|thought|analysis)>/gi, "")
+      .replace(/^(thinking|reasoning|analysis|thought)\s*:\s*/i, "")
+      .trim();
+  }
+
+  // (a) Anthropic-style top-level content blocks
   if (Array.isArray(data?.content)) {
-    const textBlock = data.content.find(b => b.type === "text");
-    if (textBlock?.text) return textBlock.text;
+    const t = cleanAnswer(blocksToText(data.content));
+    if (t) return t;
   }
 
-  // Try OpenAI format (choices array)
-  if (data?.choices?.[0]?.message?.content) {
-    return data.choices[0].message.content;
+  // (b) OpenAI-style choices[0].message
+  const msg = data?.choices?.[0]?.message;
+  if (typeof msg?.content === "string") {
+    const t = cleanAnswer(msg.content);
+    if (t) return t;
+  }
+  if (Array.isArray(msg?.content)) {
+    const t = cleanAnswer(blocksToText(msg.content));
+    if (t) return t;
   }
 
-  // Fallback: try raw content string (some APIs return { content: "text" })
-  if (typeof data?.content === "string") return data.content;
+  // (c) OpenAI legacy choices[0].text
+  if (typeof data?.choices?.[0]?.text === "string") {
+    const t = cleanAnswer(data.choices[0].text);
+    if (t) return t;
+  }
 
-  // Fallback: try text field directly
-  if (typeof data?.text === "string") return data.text;
+  // (d) Fallback: raw content/text string fields
+  if (typeof data?.content === "string") {
+    const t = cleanAnswer(data.content);
+    if (t) return t;
+  }
+  if (typeof data?.text === "string") {
+    const t = cleanAnswer(data.text);
+    if (t) return t;
+  }
 
-  throw new Error("Unexpected API response format: " + JSON.stringify(data).slice(0, 200));
+  // (f) Extra safety for non-thinking variants: output_text / answer / result
+  for (const key of ["output_text", "answer", "result"]) {
+    if (typeof data?.[key] === "string") {
+      const t = cleanAnswer(data[key]);
+      if (t) return t;
+    }
+  }
+
+  if (stopReason === "max_tokens" || stopReason === "length") {
+    throw new Error("Response truncated (max_tokens=" + maxTokens + "). The model used all tokens on reasoning. Retry — budget raised to " + maxTokens + ". If it persists, shorten input text.");
+  }
+
+  throw new Error("No answer text in API response (thinking/reasoning excluded): " + safeDump(data));
+  // Serializes an API response for error reporting without leaking any
+  // thinking/reasoning content (drops reasoning keys and thinking blocks).
+  function safeDump(obj) {
+    const REDACT_KEY = /^(thinking|reasoning|analysis|thought)/i;
+    const REDACT_TYPE = /^(thinking|reasoning|thought|analysis)$/i;
+    return JSON.stringify(obj, (key, value) => {
+      if (REDACT_KEY.test(key)) return undefined;
+      if (value && typeof value === "object" && REDACT_TYPE.test(value.type)) return undefined;
+      return value;
+    }).slice(0, 500);
+  }
 }
 
 const IMPROVE_DEFAULT_PROMPT = "Fix all grammar, spelling, and punctuation errors. Then rewrite the text to sound natural, human-written, and conversational. Use varied sentence structure and contractions where appropriate. Keep the same meaning. Return ONLY the improved text, nothing else.";
@@ -821,7 +897,7 @@ async function callCodingPlan(apiKey, endpoint, model, text, customPrompt, signa
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 2048);
+  ], signal, 16384);
 }
 
 async function callCodingPlanReply(apiKey, endpoint, model, text, replyPrompt, signal) {
@@ -829,7 +905,7 @@ async function callCodingPlanReply(apiKey, endpoint, model, text, replyPrompt, s
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 2048);
+  ], signal, 16384);
 }
 
 async function callCodingPlanSummarize(apiKey, endpoint, model, text, summaryPrompt, signal) {
@@ -837,7 +913,7 @@ async function callCodingPlanSummarize(apiKey, endpoint, model, text, summaryPro
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 1024);
+  ], signal, 16384);
 }
 
 async function callCodingPlanSocial(apiKey, endpoint, model, text, socialPrompt, signal) {
@@ -845,7 +921,7 @@ async function callCodingPlanSocial(apiKey, endpoint, model, text, socialPrompt,
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 1024);
+  ], signal, 16384);
 }
 
 // --- Custom (OpenAI-compatible) provider ---

@@ -2,3 +2,5 @@
 __MACOSX/
 *.zip
 dist/*.zip
+.opencode/
+graphify-out/
