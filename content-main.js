@@ -90,6 +90,47 @@
       } catch (err) { /* ignore */ }
     }, true);
   } catch (e) { /* ignore */ }
+
+  /**
+   * Immediate emit on a real selection gesture.
+   *
+   * The 300ms poll can sample a COLLAPSED caret: the editor collapses the
+   * selection on the final mouseup (or the browser resolves the drag range
+   * only for the tick after it), so the poll reads empty and never dispatches.
+   * Sampling 60ms after mouseup/touchend catches the range while it is still
+   * live, and re-uses the same guards as the poll so programmatic churn still
+   * cannot arm: a REAL non-collapsed user Range (isRealUserTextRange) plus
+   * lastText change OR a <1500ms-old user gesture.
+   */
+  function tryEmitNow() {
+    try {
+      var sel = window.getSelection();
+      if (!isRealUserTextRange(sel)) return;
+      var text = sel.toString().trim();
+      if (!text) return;
+      if (text === lastText && Date.now() - userSelectArmedAt >= 1500) return;
+      lastText = text;
+
+      var rect = null;
+      try {
+        var r = sel.rangeCount > 0 ? sel.getRangeAt(0).getBoundingClientRect() : null;
+        if (r && r.width > 0 && r.height > 0) {
+          rect = { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height };
+          savedSelRange = sel.getRangeAt(0).cloneRange();
+          savedSelText = text;
+        }
+      } catch (e) { /* not clonable */ }
+
+      document.dispatchEvent(
+        new CustomEvent("__ht_sel", { detail: { text: text, rect: rect, editableId: null } })
+      );
+    } catch (e) { /* ignore */ }
+  }
+  // Capture phase + 60ms delay: the gesture has settled and the editor has
+  // finished collapsing/committing its range, but before the 300ms poll.
+  document.addEventListener("mouseup", function () { setTimeout(tryEmitNow, 60); }, true);
+  document.addEventListener("touchend", function () { setTimeout(tryEmitNow, 60); }, true);
+
   // Saved selection info for text replacement
   var savedSelRange = null;
   var savedSelText = "";
@@ -116,6 +157,43 @@
   }
 
   /**
+   * Resolves a selection that lives inside a shadow tree. `document.getSelection()`
+   * is the flattened selection; when the flattened view reports nothing usable
+   * (no ranges, or a collapsed caret) the real user selection may still exist in
+   * the active element's shadowRoot, which has its own `getSelection()`.
+   * Returns that shadow selection when it carries real text, else null.
+   */
+  function resolveShadowSelection(sel) {
+    try {
+      // Chrome/Edge expose the flattened multi-range view; use it when present.
+      if (sel && typeof sel.getComposedRanges === "function") {
+        try {
+          var composed = sel.getComposedRanges({ shadowRoots: [document] });
+          if (composed && composed.length) {
+            var ct = composed.map(function (r) { return r.toString(); }).join("").trim();
+            if (ct.length >= 2) {
+              var merged = sel.rangeCount ? sel.getRangeAt(0) : composed[0];
+              if (merged && merged.toString().trim().length >= 2) return sel;
+            }
+          }
+        } catch (e) { /* not supported / cross-origin */ }
+      }
+      // Fallback: ask the focused element's own shadow root directly.
+      var ae = document.activeElement;
+      if (ae && ae.shadowRoot && typeof ae.shadowRoot.getSelection === "function") {
+        var inner = ae.shadowRoot.getSelection();
+        if (inner && inner.rangeCount > 0) {
+          var it = (inner.toString() || "").trim();
+          if (it.length >= 2) return inner;
+        }
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
    * Returns true only for a selection that is a REAL user text range and safe
    * to relay to the toolbar. Rejects transient non-collapsed ranges that
    * ProseMirror/Tiptap produce while typing (node/all selections, whole-editor
@@ -123,11 +201,26 @@
    */
   function isRealUserTextRange(sel) {
     try {
-      if (!sel || sel.rangeCount < 1) return false;
-      if (sel.isCollapsed) return false;
+      if (!sel) return false;
+      // Shadow-host fallback: when the selection lives inside a shadow tree the
+      // document-level selection can report no ranges (or a collapsed caret)
+      // even though the shadow tree holds a real user selection. Resolve the
+      // composed ranges, or ask the active element's own shadowRoot, and
+      // continue with that selection instead of rejecting outright.
+      if (sel.rangeCount < 1 || (sel.isCollapsed && (sel.toString() || "").trim().length < 2)) {
+        var resolved = resolveShadowSelection(sel);
+        if (resolved) sel = resolved;
+        else return false;
+      }
+      if (!sel.rangeCount) return false;
       if (sel.type && sel.type !== "Range") return false; // reject Node/All
+      // Text is computed BEFORE the collapse gate. A selection carrying real
+      // text is accepted even when the browser reports it collapsed; an
+      // empty/collapsed caret is still rejected by the length gate below.
+      var selText = (sel.toString() || "").trim();
+      if (sel.isCollapsed && selText.length < 2) return false;
       var range = sel.getRangeAt(0);
-      var txt = range.toString().trim();
+      var txt = (sel.isCollapsed ? selText : range.toString().trim());
       if (txt.length < 2) return false;
       if (txt.length > 20000) return false; // runaway Select All of whole editor
 
@@ -139,7 +232,29 @@
       var el = ca.nodeType === 1 ? ca : ca.parentElement;
       if (!el || !el.closest) return false;
       if (el.closest("[data-lexical-editor]")) return true;
-      if (el.closest(".ProseMirror, [contenteditable=true], [contenteditable=''], textarea, input")) {
+      // Site-agnostic: any standard editable surface or rich-text editor root.
+      // No per-site class names — the gate is the contract, not the site.
+      var EDITABLE_SEL = ".ProseMirror, [contenteditable=true], [contenteditable=''], [role=\"textbox\"], [data-lexical-editor], textarea, input";
+      if (el.closest(EDITABLE_SEL)) {
+        return true;
+      }
+      // commonAncestorContainer can be an OUTER wrapper even when both
+      // selection endpoints sit inside the editable. Retry against the
+      // anchor/focus nodes' own parents before rejecting — this is the same
+      // editable, just a different common parent.
+      var ANCHOR_SEL = EDITABLE_SEL;
+      var endpoints = [sel.anchorNode, sel.focusNode];
+      for (var i = 0; i < endpoints.length; i++) {
+        var node = endpoints[i];
+        var ep = node ? (node.nodeType === 1 ? node : node.parentElement) : null;
+        if (ep && ep.closest && ep.closest(ANCHOR_SEL)) return true;
+      }
+      // Last resort: rich editors on arbitrary sites render the selection so
+      // the common ancestor escapes every standard editable selector, yet the
+      // range is still a real user Range with real text. Text is already
+      // length-gated above (>=2, <=20000) and sel.type is "Range", so this
+      // cannot resurrect a whole-body Select All or a Node/All selection.
+      if (txt.length >= 2 && sel.type === "Range") {
         return true;
       }
       return false;
@@ -152,13 +267,10 @@
     var sel = window.getSelection();
     var text = isRealUserTextRange(sel) ? sel.toString().trim() : "";
 
-    // Require a recent real user gesture for a FIRST dispatch of NEW text.
-    // Keyboard Shift+Arrow / Ctrl+A arm via keyup; mouse drags via mouseup.
-    if (text && text !== lastText && Date.now() - userSelectArmedAt >= 5000) {
-      return;
-    }
-
-    if (text && text !== lastText) {
+// First dispatch of NEW text is guarded by userSelectArmedAt (mouseup /
+    // touchend / qualifying keyup / real-range selectionchange). Programmatic
+    // churn cannot arm, see armUserSelect / isRealUserTextRange.
+    if (text && (text !== lastText || Date.now() - userSelectArmedAt < 1500)) {
       lastText = text;
       var rect = null;
       if (sel.rangeCount > 0) {

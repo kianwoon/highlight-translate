@@ -90,7 +90,7 @@
 
   const DEBOUNCE_MS = 300;
   const CLEAR_DEBOUNCE_MS = 800;
-  const DISMISS_TIMEOUT_MS = 5000;
+  const DISMISS_TIMEOUT_MS = 30000;
   const MAX_SOURCE_LENGTH = 500; // characters to show in the source preview
   const POLL_INTERVAL_MS = 500;
 
@@ -234,7 +234,10 @@
   // `dialog[open]` (that is what applies inertness); otherwise a large visible
   // role=dialog container; null when no modal is present.
   function getModalHost() {
-    var ds = document.querySelectorAll("dialog[open],[role=dialog]");
+    // Site-agnostic: native dialog[open], ARIA dialog, Radix-style aria-modal,
+    // and any [data-state="open"] modal container. Any of these can apply
+    // inertness to the rest of the page, so the toolbar must live inside it.
+    var ds = document.querySelectorAll("dialog[open],[role=dialog],[aria-modal=\"true\"],[data-state=\"open\"]");
     for (var i = ds.length - 1; i >= 0; i--) {
       var d = ds[i];
       try {
@@ -805,6 +808,9 @@
   // ---------------------------------------------------------------------------
 
   document.addEventListener("__ht_sel", function (e) {
+    // Relay-path probe: once a __ht_sel ever reaches us, the MAIN-world script
+    // is alive and the custom-event bridge works. Read by the HEARTBEAT log.
+    window.__ht_main_loadedSeen = true;
     injectedSel = e.detail || null;
     if (injectedSel && injectedSel.text) {
       lastInjectedSelTime = Date.now();
@@ -821,7 +827,7 @@
     if (injectedSel && injectedSel.text) {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(function () {
-        if (hasFreshInjectedSel() && hasLiveSelectionSource()) showIcon();
+if (hasFreshInjectedSel()) showIcon();
       }, DEBOUNCE_MS);
     }
   });
@@ -871,7 +877,7 @@
     if (nativeText) return nativeText;
     // Only fall back to main-world injected text when it is fresh AND a live
     // selection corroborates it. A stale injectedSel must never resurrect text.
-    if (hasFreshInjectedSel() && hasLiveSelectionSource() && injectedSel && injectedSel.text) {
+    if (hasFreshInjectedSel() && injectedSel && injectedSel.text) {
       return injectedSel.text;
     }
     return "";
@@ -1234,11 +1240,11 @@
     // toolbarVisible + savedText means the user selected text and is aiming at
     // the toolbar — treat as intent. Only auto-dismiss if the injected selection
     // went stale (>3s) with no toolbar press in flight.
-    if (toolbarVisible && savedText && hasFreshInjectedSel(1500) && hasLiveSelectionSource() && !popupEl) return;
+    if (toolbarVisible && savedText && hasFreshInjectedSel(1500) && hasReliableSelectionSource() && !popupEl) return;
     // A fresh main-world selection is truth — don't dismiss on unreliable
     // isolated-world empty-selection reports (LinkedIn contenteditable). Only
     // when a live selection corroborates it; a stale injectedSel must not.
-    if (hasFreshInjectedSel() && hasLiveSelectionSource() && !popupEl) return;
+    if (hasFreshInjectedSel() && hasReliableSelectionSource() && !popupEl) return;
     removeIcon();
     removeHumanizeIcon();
     removeReplyIcon();
@@ -1295,27 +1301,37 @@
       _pollCount++;
       if (_pollCount % 6 === 0) {
         // Log every ~3 seconds (6 x 500ms) regardless of selection state
+        // mainMissing === true forever => content-main.js never reached us.
+        var mainMissing = !window.__ht_main_loadedSeen;
         console.log("[HT] HEARTBEAT", window.location.hostname,
           "sel:", text ? text.substring(0, 30) : "(empty)",
           "collapsed:", rawSel ? rawSel.isCollapsed : "no-sel",
           "rangeCount:", rawSel ? rawSel.rangeCount : 0,
-          "icon:", !!iconEl);
+          "icon:", !!iconEl,
+          "mainMissing:", mainMissing);
       }
       if (text && hasLiveSelectionSource() && !iconEl) {
         showIcon();
       } else if (!text && iconEl && !popupEl && !isRecentToolbarPress()) {
         // Selection was cleared while polling (skip during toolbar button press)
-        // Isolated-world empty selection is unreliable in LinkedIn contenteditable.
-        if (hasLiveSelectionSource()) return;
+        // Isolated-world empty selection is unreliable in LinkedIn contenteditable,
+        // so a fresh main-world relay counts as a live source here too — otherwise
+        // this clears a toolbar that the __ht_sel listener just showed.
+        if (hasReliableSelectionSource()) return;
         dismiss();
       }
-      // Hard expiry: a visible toolbar whose selection is genuinely gone (no
-      // live native/form-field selection) must not linger. A stale injectedSel
-      // alone is NOT a reason to keep it. Guarded so a press or in-flight
-      // translation is never interrupted (popupEl/isTranslating returned above).
+      // Hard expiry: a visible toolbar whose selection is genuinely gone must not
+      // linger. A fresh main-world relay counts as a live source: in the LinkedIn
+      // composer the isolated-world selection reads collapsed, so gating this on
+      // hasLiveSelectionSource() would expire a toolbar the __ht_sel path just
+      // showed. Guarded so a press or in-flight translation is never interrupted.
+      // A fresh MAIN relay is a stronger keep-alive than hasReliableSelectionSource's
+      // 800ms window: content-main.js only re-emits on a real gesture, so a relay
+      // newer than 3s means the user is still highlighting in the composer.
+      if (toolbarVisible && hasFreshInjectedSel(3000)) return;
       if (
         toolbarVisible &&
-        !hasLiveSelectionSource() &&
+        !hasReliableSelectionSource() &&
         !isRecentToolbarPress() &&
         !isTranslating &&
         !popupEl
@@ -1384,7 +1400,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("improve", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1441,7 +1457,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("reply", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1498,7 +1514,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("summarize", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1555,7 +1571,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("social", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1617,7 +1633,7 @@
       var text = getSelectedText();
       if (text && hasLiveSelectionSource()) {
         showIcon();
-      } else if (hasFreshInjectedSel() && hasLiveSelectionSource()) {
+} else if (hasFreshInjectedSel()) {
         // Isolated-world selection reads empty; injected sel is truth — but
         // only with a live native/form-field selection corroborating it.
         showIcon();
@@ -1681,7 +1697,7 @@
         showIcon();
       } else if (!text && (iconEl || humanizeIconEl || replyIconEl || summaryIconEl || socialIconEl)) {
         // Isolated-world empty selection is unreliable in LinkedIn contenteditable.
-        if (hasFreshInjectedSel() && hasLiveSelectionSource()) return;
+        if (hasFreshInjectedSel()) return;
         dismiss();
       }
     }, DEBOUNCE_MS);
@@ -1751,13 +1767,20 @@
   } else {
     var mainScript = document.createElement("script");
     mainScript.src = mainUrls;
+    // NOTE: the manifest now injects content-main.js via a world:"MAIN"
+    // content_scripts entry, which is the primary path. This src tag is a
+    // fallback for browsers/contexts where the manifest entry does not run;
+    // both are idempotent because content-main.js guards its own setup.
+    mainScript.defer = true;
     (document.head || document.documentElement).appendChild(mainScript);
     mainScript.onload = function () {
-      console.log("[HT] MAIN-world script loaded via src tag");
+      console.log("[HT] MAIN-world script loaded via src tag at", new Date().toISOString(),
+        "host:", window.location.host, "url:", mainUrls);
       mainScript.remove();
     };
     mainScript.onerror = function () {
-      console.error("[HT] MAIN-world script failed to load");
+      console.error("[HT] MAIN-world script failed to load at", new Date().toISOString(),
+        "host:", window.location.host, "url:", mainUrls);
     };
   }
 

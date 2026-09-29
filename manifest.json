@@ -29,6 +29,17 @@
       ],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "https://challenges.cloudflare.com/*",
+        "https://*.challenges.cloudflare.com/*"
+      ],
+      "js": ["content-main.js"],
+      "run_at": "document_idle",
+      "world": "MAIN",
+      "all_frames": false
     }
   ],
   "action": {
