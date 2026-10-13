@@ -161,6 +161,14 @@
   function hasLiveSelectionSource() {
     return hasLiveSelection() || hasLiveFormFieldSelection();
   }
+
+  // A selection source trustworthy enough to keep a toolbar alive even when
+  // the isolated-world selection reads empty (LinkedIn composer farbling):
+  // a live native/form-field selection, or a main-world relay fresh within
+  // its 800ms window (content-main.js only re-emits on a real user gesture).
+  function hasReliableSelectionSource() {
+    return hasLiveSelectionSource() || hasFreshInjectedSel(800);
+  }
   let lastMousePos = null; // Tracks mouse position for toolbar placement
   // Authoritative on-screen rect of the toolbar, captured BEFORE hideToolbar()
   // sets display:none (which zeroes getBoundingClientRect on the anchor icon).
@@ -968,11 +976,16 @@ if (hasFreshInjectedSel()) showIcon();
   // ---------------------------------------------------------------------------
 
   function showIcon() {
-    // HARD GATE: never show the toolbar without a LIVE non-collapsed selection.
-    // A fresh-but-stale injectedSel relayed from the main world (caret inside a
-    // word, ProseMirror range churn) is not user intent. Collapsed/empty native
-    // selection is treated as authoritative "no selection".
-    if (!hasLiveSelectionSource()) {
+    // SHOW GATE: the toolbar may appear only when a REAL user selection exists.
+    // Valid evidence: (1) isolated-world live non-collapsed selection with text,
+    // (2) <input>/<textarea> selection offsets, or (3) a fresh (<800ms)
+    // gesture-armed main-world relay — content-main.js emits ONLY non-collapsed,
+    // length-gated, user-gesture ranges, so a fresh relay is real selection
+    // evidence in editors (LinkedIn Quill/Draft.js) where the isolated world
+    // reads the selection collapsed. A stale relay never shows the toolbar:
+    // past 800ms only sources (1)/(2) qualify, so a caret left inside a word
+    // cannot resurrect the icons.
+    if (!hasReliableSelectionSource()) {
       if (!popupEl && !isTranslating && !isRecentToolbarPress()) dismiss();
       return;
     }
@@ -1310,7 +1323,7 @@ if (hasFreshInjectedSel()) showIcon();
           "icon:", !!iconEl,
           "mainMissing:", mainMissing);
       }
-      if (text && hasLiveSelectionSource() && !iconEl) {
+      if (text && hasReliableSelectionSource() && !iconEl) {
         showIcon();
       } else if (!text && iconEl && !popupEl && !isRecentToolbarPress()) {
         // Selection was cleared while polling (skip during toolbar button press)
@@ -1634,8 +1647,8 @@ if (hasFreshInjectedSel()) showIcon();
       if (text && hasLiveSelectionSource()) {
         showIcon();
 } else if (hasFreshInjectedSel()) {
-        // Isolated-world selection reads empty; injected sel is truth — but
-        // only with a live native/form-field selection corroborating it.
+        // Isolated-world selection reads empty in some editors; the fresh
+        // gesture-armed main-world relay is the evidence — showIcon's gate decides.
         showIcon();
       } else {
         dismiss();
