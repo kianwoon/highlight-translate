@@ -1,12 +1,13 @@
 # ship config — UniLingo / Highlight Translate (Chrome MV3, unpacked)
 #
 # There is no bundler: the repo root IS the extension that Chrome loads via
-# "Load unpacked" (README § Installation), so "build" means validating every
-# script and the manifest, and there is no artifact to copy anywhere.
-# After a ship, reload the extension at chrome://extensions to pick it up.
+# "Load unpacked" (README § Installation), so "build" validates every script and
+# the manifest and then packages the Chrome Web Store zip. The zip is the thing
+# you upload; the local install stays the checkout itself, so there is nothing
+# to copy anywhere. After a ship, reload the extension at chrome://extensions.
 
-build = node --check background.js && node --check content.js && node --check content-main.js && node --check options.js && node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json','utf8')); if(!m.manifest_version||!m.version) throw new Error('manifest.json missing manifest_version/version'); console.log('manifest ok: v'+m.version)"
+build = node --check background.js && node --check content.js && node --check content-main.js && node --check options.js && node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json','utf8')); if(!m.manifest_version||!m.version) throw new Error('manifest.json missing manifest_version/version'); console.log('manifest ok: v'+m.version)" && ./package.sh
 
-verify = node -e "const fs=require('fs'); for (const f of ['content.js','content-main.js']) { if (!/MIN_SELECTION_LENGTH/.test(fs.readFileSync(f,'utf8'))) throw new Error(f+' lost the selection-length gate'); } console.log('selection-length gate present')"
+verify = node -e "const fs=require('fs'); for (const f of ['content.js','content-main.js']) { if (!/MIN_SELECTION_LENGTH/.test(fs.readFileSync(f,'utf8'))) throw new Error(f+' lost the selection-length gate'); } console.log('selection-length gate present')" && node -e "const {execSync}=require('child_process'); const fs=require('fs'); const m=JSON.parse(fs.readFileSync('manifest.json','utf8')); const name=m.name.toLowerCase().replace(/[^a-z0-9]+/g,'-'); const zip=(process.env.DIST_DIR||'dist')+'/'+name+'-'+m.version+'-cws.zip'; const packed=JSON.parse(execSync('unzip -p '+JSON.stringify(zip)+' manifest.json',{encoding:'utf8'})); if(packed.version!==m.version) throw new Error('packaged manifest is v'+packed.version+', source is v'+m.version); console.log('packaged '+zip+' carries v'+packed.version)"
 
 preview = node -e "console.log('unpacked extension — reload it at chrome://extensions to load this build')"
