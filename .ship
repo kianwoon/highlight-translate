@@ -1,0 +1,12 @@
+# ship config — UniLingo / Highlight Translate (Chrome MV3, unpacked)
+#
+# There is no bundler: the repo root IS the extension that Chrome loads via
+# "Load unpacked" (README § Installation), so "build" means validating every
+# script and the manifest, and there is no artifact to copy anywhere.
+# After a ship, reload the extension at chrome://extensions to pick it up.
+
+build = node --check background.js && node --check content.js && node --check content-main.js && node --check options.js && node -e "const m=JSON.parse(require('fs').readFileSync('manifest.json','utf8')); if(!m.manifest_version||!m.version) throw new Error('manifest.json missing manifest_version/version'); console.log('manifest ok: v'+m.version)"
+
+verify = node -e "const fs=require('fs'); for (const f of ['content.js','content-main.js']) { if (!/MIN_SELECTION_LENGTH/.test(fs.readFileSync(f,'utf8'))) throw new Error(f+' lost the selection-length gate'); } console.log('selection-length gate present')"
+
+preview = node -e "console.log('unpacked extension — reload it at chrome://extensions to load this build')"
