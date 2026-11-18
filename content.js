@@ -90,9 +90,12 @@
 
   const DEBOUNCE_MS = 300;
   const CLEAR_DEBOUNCE_MS = 800;
-  const DISMISS_TIMEOUT_MS = 5000;
+  const DISMISS_TIMEOUT_MS = 30000;
   const MAX_SOURCE_LENGTH = 500; // characters to show in the source preview
   const POLL_INTERVAL_MS = 500;
+  // Minimum trimmed selection length that may surface the toolbar. Shorter
+  // highlights (a stray 1–2 char drag) are ignored.
+  const MIN_SELECTION_LENGTH = 3;
 
   // ---------------------------------------------------------------------------
   // State
@@ -115,6 +118,10 @@
   let injectedSel = null; // selection data relayed from main-world script
   let lastInjectedSelTime = 0; // Date.now() of last __ht_sel with text (freshness check)
   let clearInjectedSelTimer = null; // debounced __ht_sel_clear (survives composer re-render)
+  let lastRelayPingAt = 0; // Date.now() of last main-world bridgePost("ping")
+  let lastRelayPing = null; // last ping payload (raw main-world selection state)
+  let lastBridgeDeadWarnAt = 0;
+  let relayInitAt = Date.now(); // grace window before the bridge-dead alarm may fire
 
   // Isolated-world getSelection() is unreliable inside LinkedIn's contenteditable
   // (farbling / Draft.js); a fresh main-world injectedSel is the source of truth.
@@ -135,7 +142,7 @@
     try {
       var s = window.getSelection();
       if (!s || s.rangeCount < 1 || s.isCollapsed) return false;
-      return s.toString().trim().length >= 2;
+      return s.toString().trim().length >= MIN_SELECTION_LENGTH;
     } catch (e) {
       return false;
     }
@@ -149,7 +156,9 @@
       if (!ae) return false;
       if (ae.tagName === "TEXTAREA" ||
           (ae.tagName === "INPUT" && ae.type !== "hidden" && ae.type !== "password")) {
-        return typeof ae.selectionStart === "number" && ae.selectionEnd > ae.selectionStart;
+        if (typeof ae.selectionStart !== "number" || ae.selectionEnd <= ae.selectionStart) return false;
+        var fieldText = String(ae.value || "").substring(ae.selectionStart, ae.selectionEnd).trim();
+        return fieldText.length >= MIN_SELECTION_LENGTH;
       }
     } catch (e) { /* ignore */ }
     return false;
@@ -160,6 +169,14 @@
   // corroborated by a live native or form-field selection.
   function hasLiveSelectionSource() {
     return hasLiveSelection() || hasLiveFormFieldSelection();
+  }
+
+  // A selection source trustworthy enough to keep a toolbar alive even when
+  // the isolated-world selection reads empty (LinkedIn composer farbling):
+  // a live native/form-field selection, or a main-world relay fresh within
+  // its 800ms window (content-main.js only re-emits on a real user gesture).
+  function hasReliableSelectionSource() {
+    return hasLiveSelectionSource() || hasFreshInjectedSel(800);
   }
   let lastMousePos = null; // Tracks mouse position for toolbar placement
   // Authoritative on-screen rect of the toolbar, captured BEFORE hideToolbar()
@@ -234,7 +251,10 @@
   // `dialog[open]` (that is what applies inertness); otherwise a large visible
   // role=dialog container; null when no modal is present.
   function getModalHost() {
-    var ds = document.querySelectorAll("dialog[open],[role=dialog]");
+    // Site-agnostic: native dialog[open], ARIA dialog, Radix-style aria-modal,
+    // and any [data-state="open"] modal container. Any of these can apply
+    // inertness to the rest of the page, so the toolbar must live inside it.
+    var ds = document.querySelectorAll("dialog[open],[role=dialog],[aria-modal=\"true\"],[data-state=\"open\"]");
     for (var i = ds.length - 1; i >= 0; i--) {
       var d = ds[i];
       try {
@@ -804,8 +824,11 @@
   // Listen for selection events from the main-world script (content-main.js).
   // ---------------------------------------------------------------------------
 
-  document.addEventListener("__ht_sel", function (e) {
-    injectedSel = e.detail || null;
+  function handleRelaySelection(detail) {
+    // Relay-path probe: once a __ht_sel ever reaches us, the MAIN-world script
+    // is alive and the custom-event bridge works. Read by the HEARTBEAT log.
+    window.__ht_main_loadedSeen = true;
+    injectedSel = detail || null;
     if (injectedSel && injectedSel.text) {
       lastInjectedSelTime = Date.now();
       // A fresh selection supersedes any pending debounced clear.
@@ -821,11 +844,13 @@
     if (injectedSel && injectedSel.text) {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(function () {
-        if (hasFreshInjectedSel() && hasLiveSelectionSource()) showIcon();
+if (hasFreshInjectedSel()) showIcon();
       }, DEBOUNCE_MS);
     }
-  });
-  document.addEventListener("__ht_sel_clear", function () {
+  }
+  document.addEventListener("__ht_sel", function (e) { handleRelaySelection(e.detail); });
+
+  function handleRelayClear() {
     // A blur-clear during a toolbar icon press (or while translating) is
     // noise, not user intent — keep the injected selection so freshness
     // guards keep working. lastInjectedSelTime is untouched, so genuine
@@ -854,6 +879,18 @@
       // press/translation is in flight.
       if (!popupEl && !isTranslating && !isRecentToolbarPress()) hideToolbar();
     }, CLEAR_DEBOUNCE_MS);
+  }
+  document.addEventListener("__ht_sel_clear", handleRelayClear);
+
+  // Bridge channel 2 receiver — paired with every main-world CustomEvent.
+  window.addEventListener("message", function (e) {
+    if (e.source !== window || !e.data || e.data.__ht !== true) return;
+    if (e.data.type === "sel") handleRelaySelection(e.data);
+    else if (e.data.type === "clear") handleRelayClear();
+    else if (e.data.type === "ping" || e.data.type === "boot") {
+      lastRelayPingAt = Date.now();
+      lastRelayPing = e.data;
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -871,7 +908,7 @@
     if (nativeText) return nativeText;
     // Only fall back to main-world injected text when it is fresh AND a live
     // selection corroborates it. A stale injectedSel must never resurrect text.
-    if (hasFreshInjectedSel() && hasLiveSelectionSource() && injectedSel && injectedSel.text) {
+    if (hasFreshInjectedSel() && injectedSel && injectedSel.text) {
       return injectedSel.text;
     }
     return "";
@@ -962,11 +999,16 @@
   // ---------------------------------------------------------------------------
 
   function showIcon() {
-    // HARD GATE: never show the toolbar without a LIVE non-collapsed selection.
-    // A fresh-but-stale injectedSel relayed from the main world (caret inside a
-    // word, ProseMirror range churn) is not user intent. Collapsed/empty native
-    // selection is treated as authoritative "no selection".
-    if (!hasLiveSelectionSource()) {
+    // SHOW GATE: the toolbar may appear only when a REAL user selection exists.
+    // Valid evidence: (1) isolated-world live non-collapsed selection with text,
+    // (2) <input>/<textarea> selection offsets, or (3) a fresh (<800ms)
+    // gesture-armed main-world relay — content-main.js emits ONLY non-collapsed,
+    // length-gated, user-gesture ranges, so a fresh relay is real selection
+    // evidence in editors (LinkedIn Quill/Draft.js) where the isolated world
+    // reads the selection collapsed. A stale relay never shows the toolbar:
+    // past 800ms only sources (1)/(2) qualify, so a caret left inside a word
+    // cannot resurrect the icons.
+    if (!hasReliableSelectionSource()) {
       if (!popupEl && !isTranslating && !isRecentToolbarPress()) dismiss();
       return;
     }
@@ -978,6 +1020,12 @@
     if (!text) {
       if (hasFreshInjectedSel()) return; // injected sel is truth; don't dismiss
       dismiss();
+      return;
+    }
+    // LENGTH GATE: a highlight shorter than MIN_SELECTION_LENGTH characters
+    // (after trimming) never surfaces the toolbar, whatever the source.
+    if (text.trim().length < MIN_SELECTION_LENGTH) {
+      if (!popupEl && !isTranslating && !isRecentToolbarPress()) dismiss();
       return;
     }
 
@@ -1234,11 +1282,11 @@
     // toolbarVisible + savedText means the user selected text and is aiming at
     // the toolbar — treat as intent. Only auto-dismiss if the injected selection
     // went stale (>3s) with no toolbar press in flight.
-    if (toolbarVisible && savedText && hasFreshInjectedSel(1500) && hasLiveSelectionSource() && !popupEl) return;
+    if (toolbarVisible && savedText && hasFreshInjectedSel(1500) && hasReliableSelectionSource() && !popupEl) return;
     // A fresh main-world selection is truth — don't dismiss on unreliable
     // isolated-world empty-selection reports (LinkedIn contenteditable). Only
     // when a live selection corroborates it; a stale injectedSel must not.
-    if (hasFreshInjectedSel() && hasLiveSelectionSource() && !popupEl) return;
+    if (hasFreshInjectedSel() && hasReliableSelectionSource() && !popupEl) return;
     removeIcon();
     removeHumanizeIcon();
     removeReplyIcon();
@@ -1295,27 +1343,43 @@
       _pollCount++;
       if (_pollCount % 6 === 0) {
         // Log every ~3 seconds (6 x 500ms) regardless of selection state
+        // mainMissing === true forever => content-main.js never reached us.
+        var mainMissing = !window.__ht_main_loadedSeen;
         console.log("[HT] HEARTBEAT", window.location.hostname,
           "sel:", text ? text.substring(0, 30) : "(empty)",
           "collapsed:", rawSel ? rawSel.isCollapsed : "no-sel",
           "rangeCount:", rawSel ? rawSel.rangeCount : 0,
-          "icon:", !!iconEl);
+          "icon:", !!iconEl,
+          "mainMissing:", mainMissing,
+          "relay:", (Date.now() - lastRelayPingAt < 10000) ? "alive" : "dead",
+          "mSel:", lastRelayPing ? (lastRelayPing.selCollapsed + "/" + lastRelayPing.selRangeCount + "/" + lastRelayPing.selTextLen) : "-");
       }
-      if (text && hasLiveSelectionSource() && !iconEl) {
+      if (Date.now() - lastRelayPingAt > 10000 && Date.now() - lastBridgeDeadWarnAt > 30000 && Date.now() - relayInitAt > 15000 && window.__ht_main_loadedSeen === undefined) {
+        lastBridgeDeadWarnAt = Date.now();
+        console.warn("[HT-MAIN] BRIDGE DEAD: no main-world pings or sel events. Main sensor not running — check [HT-MAIN] console lines and the manifest world:MAIN entry.");
+      }
+      if (text && hasReliableSelectionSource() && !iconEl) {
         showIcon();
       } else if (!text && iconEl && !popupEl && !isRecentToolbarPress()) {
         // Selection was cleared while polling (skip during toolbar button press)
-        // Isolated-world empty selection is unreliable in LinkedIn contenteditable.
-        if (hasLiveSelectionSource()) return;
+        // Isolated-world empty selection is unreliable in LinkedIn contenteditable,
+        // so a fresh main-world relay counts as a live source here too — otherwise
+        // this clears a toolbar that the __ht_sel listener just showed.
+        if (hasReliableSelectionSource()) return;
         dismiss();
       }
-      // Hard expiry: a visible toolbar whose selection is genuinely gone (no
-      // live native/form-field selection) must not linger. A stale injectedSel
-      // alone is NOT a reason to keep it. Guarded so a press or in-flight
-      // translation is never interrupted (popupEl/isTranslating returned above).
+      // Hard expiry: a visible toolbar whose selection is genuinely gone must not
+      // linger. A fresh main-world relay counts as a live source: in the LinkedIn
+      // composer the isolated-world selection reads collapsed, so gating this on
+      // hasLiveSelectionSource() would expire a toolbar the __ht_sel path just
+      // showed. Guarded so a press or in-flight translation is never interrupted.
+      // A fresh MAIN relay is a stronger keep-alive than hasReliableSelectionSource's
+      // 800ms window: content-main.js only re-emits on a real gesture, so a relay
+      // newer than 3s means the user is still highlighting in the composer.
+      if (toolbarVisible && hasFreshInjectedSel(3000)) return;
       if (
         toolbarVisible &&
-        !hasLiveSelectionSource() &&
+        !hasReliableSelectionSource() &&
         !isRecentToolbarPress() &&
         !isTranslating &&
         !popupEl
@@ -1384,7 +1448,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("improve", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1441,7 +1505,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("reply", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1498,7 +1562,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("summarize", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1555,7 +1619,7 @@
         isTranslating = false;
         showPopup("Request timed out. Please try again.", text);
       }
-    }, 30000);
+    }, 140000);
 
     getLanguageHintForText(text).then((languageCode) => sendMessageSafe("social", text, { languageCode: languageCode })).then((response) => {
       clearTimeout(safetyTimer);
@@ -1617,9 +1681,9 @@
       var text = getSelectedText();
       if (text && hasLiveSelectionSource()) {
         showIcon();
-      } else if (hasFreshInjectedSel() && hasLiveSelectionSource()) {
-        // Isolated-world selection reads empty; injected sel is truth — but
-        // only with a live native/form-field selection corroborating it.
+} else if (hasFreshInjectedSel()) {
+        // Isolated-world selection reads empty in some editors; the fresh
+        // gesture-armed main-world relay is the evidence — showIcon's gate decides.
         showIcon();
       } else {
         dismiss();
@@ -1681,7 +1745,7 @@
         showIcon();
       } else if (!text && (iconEl || humanizeIconEl || replyIconEl || summaryIconEl || socialIconEl)) {
         // Isolated-world empty selection is unreliable in LinkedIn contenteditable.
-        if (hasFreshInjectedSel() && hasLiveSelectionSource()) return;
+        if (hasFreshInjectedSel()) return;
         dismiss();
       }
     }, DEBOUNCE_MS);
@@ -1751,13 +1815,20 @@
   } else {
     var mainScript = document.createElement("script");
     mainScript.src = mainUrls;
+    // NOTE: the manifest now injects content-main.js via a world:"MAIN"
+    // content_scripts entry, which is the primary path. This src tag is a
+    // fallback for browsers/contexts where the manifest entry does not run;
+    // both are idempotent because content-main.js guards its own setup.
+    mainScript.defer = true;
     (document.head || document.documentElement).appendChild(mainScript);
     mainScript.onload = function () {
-      console.log("[HT] MAIN-world script loaded via src tag");
+      console.log("[HT] MAIN-world script loaded via src tag at", new Date().toISOString(),
+        "host:", window.location.host, "url:", mainUrls);
       mainScript.remove();
     };
     mainScript.onerror = function () {
-      console.error("[HT] MAIN-world script failed to load");
+      console.error("[HT] MAIN-world script failed to load at", new Date().toISOString(),
+        "host:", window.location.host, "url:", mainUrls);
     };
   }
 
