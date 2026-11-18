@@ -2,3 +2,7 @@
 __MACOSX/
 *.zip
 dist/*.zip
+
+# Generated / local tooling state — never part of the extension build
+graphify-out/
+.opencode/
