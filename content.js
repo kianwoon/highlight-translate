@@ -115,6 +115,10 @@
   let injectedSel = null; // selection data relayed from main-world script
   let lastInjectedSelTime = 0; // Date.now() of last __ht_sel with text (freshness check)
   let clearInjectedSelTimer = null; // debounced __ht_sel_clear (survives composer re-render)
+  let lastRelayPingAt = 0; // Date.now() of last main-world bridgePost("ping")
+  let lastRelayPing = null; // last ping payload (raw main-world selection state)
+  let lastBridgeDeadWarnAt = 0;
+  let relayInitAt = Date.now(); // grace window before the bridge-dead alarm may fire
 
   // Isolated-world getSelection() is unreliable inside LinkedIn's contenteditable
   // (farbling / Draft.js); a fresh main-world injectedSel is the source of truth.
@@ -815,11 +819,11 @@
   // Listen for selection events from the main-world script (content-main.js).
   // ---------------------------------------------------------------------------
 
-  document.addEventListener("__ht_sel", function (e) {
+  function handleRelaySelection(detail) {
     // Relay-path probe: once a __ht_sel ever reaches us, the MAIN-world script
     // is alive and the custom-event bridge works. Read by the HEARTBEAT log.
     window.__ht_main_loadedSeen = true;
-    injectedSel = e.detail || null;
+    injectedSel = detail || null;
     if (injectedSel && injectedSel.text) {
       lastInjectedSelTime = Date.now();
       // A fresh selection supersedes any pending debounced clear.
@@ -838,8 +842,10 @@
 if (hasFreshInjectedSel()) showIcon();
       }, DEBOUNCE_MS);
     }
-  });
-  document.addEventListener("__ht_sel_clear", function () {
+  }
+  document.addEventListener("__ht_sel", function (e) { handleRelaySelection(e.detail); });
+
+  function handleRelayClear() {
     // A blur-clear during a toolbar icon press (or while translating) is
     // noise, not user intent — keep the injected selection so freshness
     // guards keep working. lastInjectedSelTime is untouched, so genuine
@@ -868,6 +874,18 @@ if (hasFreshInjectedSel()) showIcon();
       // press/translation is in flight.
       if (!popupEl && !isTranslating && !isRecentToolbarPress()) hideToolbar();
     }, CLEAR_DEBOUNCE_MS);
+  }
+  document.addEventListener("__ht_sel_clear", handleRelayClear);
+
+  // Bridge channel 2 receiver — paired with every main-world CustomEvent.
+  window.addEventListener("message", function (e) {
+    if (e.source !== window || !e.data || e.data.__ht !== true) return;
+    if (e.data.type === "sel") handleRelaySelection(e.data);
+    else if (e.data.type === "clear") handleRelayClear();
+    else if (e.data.type === "ping" || e.data.type === "boot") {
+      lastRelayPingAt = Date.now();
+      lastRelayPing = e.data;
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -1321,7 +1339,13 @@ if (hasFreshInjectedSel()) showIcon();
           "collapsed:", rawSel ? rawSel.isCollapsed : "no-sel",
           "rangeCount:", rawSel ? rawSel.rangeCount : 0,
           "icon:", !!iconEl,
-          "mainMissing:", mainMissing);
+          "mainMissing:", mainMissing,
+          "relay:", (Date.now() - lastRelayPingAt < 10000) ? "alive" : "dead",
+          "mSel:", lastRelayPing ? (lastRelayPing.selCollapsed + "/" + lastRelayPing.selRangeCount + "/" + lastRelayPing.selTextLen) : "-");
+      }
+      if (Date.now() - lastRelayPingAt > 10000 && Date.now() - lastBridgeDeadWarnAt > 30000 && Date.now() - relayInitAt > 15000 && window.__ht_main_loadedSeen === undefined) {
+        lastBridgeDeadWarnAt = Date.now();
+        console.warn("[HT-MAIN] BRIDGE DEAD: no main-world pings or sel events. Main sensor not running — check [HT-MAIN] console lines and the manifest world:MAIN entry.");
       }
       if (text && hasReliableSelectionSource() && !iconEl) {
         showIcon();

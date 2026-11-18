@@ -591,7 +591,7 @@ async function callGemini(apiKey, model, text, customPrompt, signal) {
       body: JSON.stringify({
         contents: [{ parts: [{ text }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+        generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
       }),
       signal,
     }
@@ -630,7 +630,7 @@ async function callOpenAI(apiKey, model, text, customPrompt, signal) {
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -663,7 +663,7 @@ async function callAnthropic(apiKey, model, text, customPrompt, signal) {
       system: systemPrompt,
       messages: [{ role: "user", content: text }],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -697,7 +697,7 @@ async function callOpenRouter(apiKey, model, text, customPrompt, signal) {
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -736,6 +736,28 @@ function isAnthropicFormat(endpoint) {
   return /anthropic/i.test(endpoint);
 }
 
+// Invariant: extract the assistant's ANSWER text from any supported response
+// envelope. Reasoning ("thinking") blocks are never user-facing; a response
+// that carries reasoning but no answer is a truncated response and must
+// surface a clear error, never a generic format error.
+function extractResponseText(data) {
+  // Anthropic format: content array with typed blocks
+  if (Array.isArray(data?.content)) {
+    const textBlock = data.content.find(b => b.type === "text" && typeof b.text === "string" && b.text.trim());
+    if (textBlock) return textBlock.text;
+    if (data.content.some(b => b.type === "thinking")) {
+      throw new Error("Model returned reasoning only — the answer was truncated before it was produced. Try again.");
+    }
+  }
+  // OpenAI format: choices array
+  if (data?.choices?.[0]?.message?.content) return data.choices[0].message.content;
+  // Raw content string
+  if (typeof data?.content === "string") return data.content;
+  // Text field directly
+  if (typeof data?.text === "string") return data.text;
+  throw new Error("Unexpected API response format: " + JSON.stringify(data).slice(0, 200));
+}
+
 async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, maxTokens) {
   if (!model) throw new Error("Model required for AI Coding Plan");
 
@@ -770,6 +792,7 @@ async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, max
       system: [{ type: "text", text: systemMsg?.content || "" }],
       messages: userMessages,
       stream: false,
+      thinking: { type: "disabled" },
     });
   } else {
     headers["Authorization"] = `Bearer ${apiKey}`;
@@ -778,6 +801,7 @@ async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, max
       messages,
       temperature: 0.7,
       max_tokens: maxTokens,
+      thinking: { type: "disabled" },
     });
   }
 
@@ -793,25 +817,7 @@ async function callCodingPlanBase(apiKey, endpoint, model, messages, signal, max
   if (!response.ok) throw makeApiError(`HTTP ${response.status}: ${response.statusText}`);
 
   const data = await response.json();
-
-  // Try Anthropic format first (content array with text blocks)
-  if (Array.isArray(data?.content)) {
-    const textBlock = data.content.find(b => b.type === "text");
-    if (textBlock?.text) return textBlock.text;
-  }
-
-  // Try OpenAI format (choices array)
-  if (data?.choices?.[0]?.message?.content) {
-    return data.choices[0].message.content;
-  }
-
-  // Fallback: try raw content string (some APIs return { content: "text" })
-  if (typeof data?.content === "string") return data.content;
-
-  // Fallback: try text field directly
-  if (typeof data?.text === "string") return data.text;
-
-  throw new Error("Unexpected API response format: " + JSON.stringify(data).slice(0, 200));
+  return extractResponseText(data);
 }
 
 const IMPROVE_DEFAULT_PROMPT = "Fix all grammar, spelling, and punctuation errors. Then rewrite the text to sound natural, human-written, and conversational. Use varied sentence structure and contractions where appropriate. Keep the same meaning. Return ONLY the improved text, nothing else.";
@@ -821,7 +827,7 @@ async function callCodingPlan(apiKey, endpoint, model, text, customPrompt, signa
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 2048);
+  ], signal, 8192);
 }
 
 async function callCodingPlanReply(apiKey, endpoint, model, text, replyPrompt, signal) {
@@ -829,7 +835,7 @@ async function callCodingPlanReply(apiKey, endpoint, model, text, replyPrompt, s
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 2048);
+  ], signal, 8192);
 }
 
 async function callCodingPlanSummarize(apiKey, endpoint, model, text, summaryPrompt, signal) {
@@ -837,7 +843,7 @@ async function callCodingPlanSummarize(apiKey, endpoint, model, text, summaryPro
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 1024);
+  ], signal, 8192);
 }
 
 async function callCodingPlanSocial(apiKey, endpoint, model, text, socialPrompt, signal) {
@@ -845,7 +851,7 @@ async function callCodingPlanSocial(apiKey, endpoint, model, text, socialPrompt,
   return callCodingPlanBase(apiKey, endpoint, model, [
     { role: "system", content: systemPrompt },
     { role: "user", content: text },
-  ], signal, 1024);
+  ], signal, 8192);
 }
 
 // --- Custom (OpenAI-compatible) provider ---
@@ -869,7 +875,7 @@ async function callCustom(apiKey, customEndpoint, model, text, customPrompt, sig
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -903,7 +909,7 @@ async function callGeminiReply(apiKey, model, text, replyPrompt, signal) {
       body: JSON.stringify({
         contents: [{ parts: [{ text }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+        generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
       }),
       signal,
     }
@@ -941,7 +947,7 @@ async function callOpenAIReply(apiKey, model, text, replyPrompt, signal) {
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -973,7 +979,7 @@ async function callAnthropicReply(apiKey, model, text, replyPrompt, signal) {
       system: systemPrompt,
       messages: [{ role: "user", content: text }],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1006,7 +1012,7 @@ async function callOpenRouterReply(apiKey, model, text, replyPrompt, signal) {
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1054,7 +1060,7 @@ async function callCustomReply(apiKey, customEndpoint, model, text, replyPrompt,
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 2048,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1082,7 +1088,7 @@ async function callGeminiSummarize(apiKey, model, text, summaryPrompt, signal) {
       body: JSON.stringify({
         contents: [{ parts: [{ text }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+        generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
       }),
       signal,
     }
@@ -1120,7 +1126,7 @@ async function callOpenAISummarize(apiKey, model, text, summaryPrompt, signal) {
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1152,7 +1158,7 @@ async function callAnthropicSummarize(apiKey, model, text, summaryPrompt, signal
       system: systemPrompt,
       messages: [{ role: "user", content: text }],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1185,7 +1191,7 @@ async function callOpenRouterSummarize(apiKey, model, text, summaryPrompt, signa
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1233,7 +1239,7 @@ async function callCustomSummarize(apiKey, customEndpoint, model, text, summaryP
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1261,7 +1267,7 @@ async function callGeminiSocial(apiKey, model, text, socialPrompt, signal) {
       body: JSON.stringify({
         contents: [{ parts: [{ text }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] },
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+        generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
       }),
       signal,
     }
@@ -1299,7 +1305,7 @@ async function callOpenAISocial(apiKey, model, text, socialPrompt, signal) {
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1331,7 +1337,7 @@ async function callAnthropicSocial(apiKey, model, text, socialPrompt, signal) {
       system: systemPrompt,
       messages: [{ role: "user", content: text }],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1364,7 +1370,7 @@ async function callOpenRouterSocial(apiKey, model, text, socialPrompt, signal) {
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });
@@ -1412,7 +1418,7 @@ async function callCustomSocial(apiKey, customEndpoint, model, text, socialPromp
         { role: "user", content: text },
       ],
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 8192,
     }),
     signal,
   });

@@ -11,6 +11,21 @@
 (function () {
   "use strict";
 
+  // Same-window idempotency: manifest world:"MAIN" entry + src-tag fallback
+  // both execute this file in the SAME main-world window. Second run is a no-op.
+  if (window.__ht_main_booted) { return; }
+  window.__ht_main_booted = true;
+
+  // Channel 2: window.postMessage — observable in DevTools, survives any
+  // CustomEvent detail stripping. Every selection-relay CustomEvent dispatch is paired with this (replace-path events are not).
+  function bridgePost(type, payload) {
+    try {
+      var msg = { __ht: true, type: type };
+      if (payload) for (var k in payload) msg[k] = payload[k];
+      window.postMessage(msg, "*");
+    } catch (e) { /* ignore */ }
+  }
+
   // NOTE: the isolated world's `window` is a DIFFERENT object from this MAIN
   // world's `window` — a cross-world `__ht_dead` flag is unobservable here and
   // was removed. This script runs unconditionally after the security guards
@@ -61,6 +76,7 @@
   // Liveness marker, probeable from the SAME (main) world. Note: this is not
   // visible to the isolated-world content script.
   window.__ht_main_loaded = "v4";
+  bridgePost("boot", {});
   console.log("[HT-MAIN] alive", location.hostname);
 
   console.log("[HT-MAIN] MAIN-world script loaded on", window.location.hostname, "v4");
@@ -124,12 +140,28 @@
       document.dispatchEvent(
         new CustomEvent("__ht_sel", { detail: { text: text, rect: rect, editableId: null } })
       );
+      bridgePost("sel", { text: text, rect: rect, editableId: null });
     } catch (e) { /* ignore */ }
   }
   // Capture phase + 60ms delay: the gesture has settled and the editor has
   // finished collapsing/committing its range, but before the 300ms poll.
   document.addEventListener("mouseup", function () { setTimeout(tryEmitNow, 60); }, true);
   document.addEventListener("touchend", function () { setTimeout(tryEmitNow, 60); }, true);
+
+  // Link-liveness ping: lets the isolated-world heartbeat distinguish
+  // (a) main script dead (no pings), (b) sensor blind (pings show collapsed/0
+  // ranges), (c) validator rejecting (pings show real text but no sel events),
+  // (d) event delivery broken (pings + sel events missing while pings alive).
+  setInterval(function () {
+    var sel = null;
+    try { sel = window.getSelection(); } catch (e) { /* ignore */ }
+    bridgePost("ping", {
+      armedAgeMs: userSelectArmedAt ? (Date.now() - userSelectArmedAt) : -1,
+      selCollapsed: sel ? !!sel.isCollapsed : null,
+      selRangeCount: sel ? sel.rangeCount : null,
+      selTextLen: sel ? (sel.toString() || "").trim().length : null
+    });
+  }, 3000);
 
   // Saved selection info for text replacement
   var savedSelRange = null;
@@ -340,6 +372,7 @@
       document.dispatchEvent(
         new CustomEvent("__ht_sel", { detail: { text: text, rect: rect, editableId: editableId } })
       );
+      bridgePost("sel", { text: text, rect: rect, editableId: editableId });
     } else if (!text && lastText) {
       lastText = "";
       // IMPORTANT: do NOT clear savedFormField here. Clicking the extension's
@@ -348,6 +381,7 @@
       // form-field handle is validated at replace time and overwritten when a
       // NEW selection is captured — it must survive focus loss.
       document.dispatchEvent(new CustomEvent("__ht_sel_clear"));
+      bridgePost("clear", {});
     }
   }, POLL_MS);
 
