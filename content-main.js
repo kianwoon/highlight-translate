@@ -82,6 +82,9 @@
   console.log("[HT-MAIN] MAIN-world script loaded on", window.location.hostname, "v4");
 
   var POLL_MS = 300;
+  // Minimum trimmed selection length worth relaying to the toolbar. Must stay
+  // in sync with MIN_SELECTION_LENGTH in content.js (the isolated-world gate).
+  var MIN_SELECTION_LENGTH = 3;
   var lastText = "";
   // Timestamp of the last REAL user selection gesture (mouseup/touchend/
   // qualifying keyup). Editor-internal / programmatic range churn does NOT
@@ -203,9 +206,9 @@
           var composed = sel.getComposedRanges({ shadowRoots: [document] });
           if (composed && composed.length) {
             var ct = composed.map(function (r) { return r.toString(); }).join("").trim();
-            if (ct.length >= 2) {
+            if (ct.length >= MIN_SELECTION_LENGTH) {
               var merged = sel.rangeCount ? sel.getRangeAt(0) : composed[0];
-              if (merged && merged.toString().trim().length >= 2) return sel;
+              if (merged && merged.toString().trim().length >= MIN_SELECTION_LENGTH) return sel;
             }
           }
         } catch (e) { /* not supported / cross-origin */ }
@@ -216,7 +219,7 @@
         var inner = ae.shadowRoot.getSelection();
         if (inner && inner.rangeCount > 0) {
           var it = (inner.toString() || "").trim();
-          if (it.length >= 2) return inner;
+          if (it.length >= MIN_SELECTION_LENGTH) return inner;
         }
       }
       return null;
@@ -239,7 +242,7 @@
       // even though the shadow tree holds a real user selection. Resolve the
       // composed ranges, or ask the active element's own shadowRoot, and
       // continue with that selection instead of rejecting outright.
-      if (sel.rangeCount < 1 || (sel.isCollapsed && (sel.toString() || "").trim().length < 2)) {
+      if (sel.rangeCount < 1 || (sel.isCollapsed && (sel.toString() || "").trim().length < MIN_SELECTION_LENGTH)) {
         var resolved = resolveShadowSelection(sel);
         if (resolved) sel = resolved;
         else return false;
@@ -250,10 +253,10 @@
       // text is accepted even when the browser reports it collapsed; an
       // empty/collapsed caret is still rejected by the length gate below.
       var selText = (sel.toString() || "").trim();
-      if (sel.isCollapsed && selText.length < 2) return false;
+      if (sel.isCollapsed && selText.length < MIN_SELECTION_LENGTH) return false;
       var range = sel.getRangeAt(0);
       var txt = (sel.isCollapsed ? selText : range.toString().trim());
-      if (txt.length < 2) return false;
+      if (txt.length < MIN_SELECTION_LENGTH) return false;
       if (txt.length > 20000) return false; // runaway Select All of whole editor
 
       var ca = range.commonAncestorContainer;
@@ -284,9 +287,10 @@
       // Last resort: rich editors on arbitrary sites render the selection so
       // the common ancestor escapes every standard editable selector, yet the
       // range is still a real user Range with real text. Text is already
-      // length-gated above (>=2, <=20000) and sel.type is "Range", so this
-      // cannot resurrect a whole-body Select All or a Node/All selection.
-      if (txt.length >= 2 && sel.type === "Range") {
+      // length-gated above (>=MIN_SELECTION_LENGTH, <=20000) and sel.type is
+      // "Range", so this cannot resurrect a whole-body Select All or a
+      // Node/All selection.
+      if (txt.length >= MIN_SELECTION_LENGTH && sel.type === "Range") {
         return true;
       }
       return false;

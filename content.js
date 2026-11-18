@@ -93,6 +93,9 @@
   const DISMISS_TIMEOUT_MS = 30000;
   const MAX_SOURCE_LENGTH = 500; // characters to show in the source preview
   const POLL_INTERVAL_MS = 500;
+  // Minimum trimmed selection length that may surface the toolbar. Shorter
+  // highlights (a stray 1–2 char drag) are ignored.
+  const MIN_SELECTION_LENGTH = 3;
 
   // ---------------------------------------------------------------------------
   // State
@@ -139,7 +142,7 @@
     try {
       var s = window.getSelection();
       if (!s || s.rangeCount < 1 || s.isCollapsed) return false;
-      return s.toString().trim().length >= 2;
+      return s.toString().trim().length >= MIN_SELECTION_LENGTH;
     } catch (e) {
       return false;
     }
@@ -153,7 +156,9 @@
       if (!ae) return false;
       if (ae.tagName === "TEXTAREA" ||
           (ae.tagName === "INPUT" && ae.type !== "hidden" && ae.type !== "password")) {
-        return typeof ae.selectionStart === "number" && ae.selectionEnd > ae.selectionStart;
+        if (typeof ae.selectionStart !== "number" || ae.selectionEnd <= ae.selectionStart) return false;
+        var fieldText = String(ae.value || "").substring(ae.selectionStart, ae.selectionEnd).trim();
+        return fieldText.length >= MIN_SELECTION_LENGTH;
       }
     } catch (e) { /* ignore */ }
     return false;
@@ -1015,6 +1020,12 @@ if (hasFreshInjectedSel()) showIcon();
     if (!text) {
       if (hasFreshInjectedSel()) return; // injected sel is truth; don't dismiss
       dismiss();
+      return;
+    }
+    // LENGTH GATE: a highlight shorter than MIN_SELECTION_LENGTH characters
+    // (after trimming) never surfaces the toolbar, whatever the source.
+    if (text.trim().length < MIN_SELECTION_LENGTH) {
+      if (!popupEl && !isTranslating && !isRecentToolbarPress()) dismiss();
       return;
     }
 
