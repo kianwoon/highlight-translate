@@ -108,6 +108,13 @@
         }
       } catch (err) { /* ignore */ }
     }, true);
+    // Programmatic/editor range churn does NOT re-arm: the resulting selection
+    // must be a REAL user text range (isRealUserTextRange rejects churn).
+    document.addEventListener("selectionchange", function () {
+      try {
+        if (isRealUserTextRange(window.getSelection())) armUserSelect();
+      } catch (err) { /* ignore */ }
+    }, true);
   } catch (e) { /* ignore */ }
 
   /**

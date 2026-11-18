@@ -335,17 +335,25 @@ async function fetchTranslation(text, targetLanguage) {
   return response.json();
 }
 
+// 1st toolbar icon = bidirectional translate: Chinese input → English,
+// everything else → Simplified Chinese. The direction is decided LOCALLY with a
+// CJK ideograph check and never from Google's detectedLanguage field: on the
+// dict-chrome-ex endpoint that field is missing or garbage for short
+// dictionary-style queries, so Chinese input fell through to zh-CN and came
+// back unchanged ("no translation"). Deciding locally also halves CN→EN
+// latency, since one fetch replaces the old two-pass round trip.
+const CJK_IDEOGRAPH_REGEX = /[㐀-䶿一-鿿豈-﫿]/;
+
+function isChineseText(text) {
+  return CJK_IDEOGRAPH_REGEX.test(text);
+}
+
 async function handleTranslation(text) {
-  const initialData = await fetchTranslation(text, DEFAULT_TRANSLATION_TARGET);
-  const { translatedText, detectedLanguage } = extractTranslationParts(initialData);
-  const targetLanguage = getTranslationTargetForDetectedLanguage(detectedLanguage);
-
-  if (targetLanguage === DEFAULT_TRANSLATION_TARGET) {
-    return translatedText;
-  }
-
-  const translatedData = await fetchTranslation(text, targetLanguage);
-  return extractTranslatedText(translatedData);
+  const targetLanguage = isChineseText(text)
+    ? CHINESE_TRANSLATION_TARGET
+    : DEFAULT_TRANSLATION_TARGET;
+  const data = await fetchTranslation(text, targetLanguage);
+  return extractTranslatedText(data);
 }
 
 async function handleImprove(text, languageCode) {
